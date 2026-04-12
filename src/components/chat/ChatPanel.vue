@@ -16,6 +16,31 @@ const renameSessionId = ref<string | null>(null)
 const renameInputRef = ref<InstanceType<typeof NInput> | null>(null)
 const collapsedGroups = ref<Set<string>>(new Set())
 
+const sourceLabel: Record<string, string> = {
+  telegram: 'Telegram',
+  api_server: 'API Server',
+  cli: 'CLI',
+  discord: 'Discord',
+  slack: 'Slack',
+  matrix: 'Matrix',
+  whatsapp: 'WhatsApp',
+  signal: 'Signal',
+  email: 'Email',
+  sms: 'SMS',
+  dingtalk: 'DingTalk',
+  feishu: 'Feishu',
+  wecom: 'WeCom',
+  weixin: 'WeChat',
+  bluebubbles: 'iMessage',
+  mattermost: 'Mattermost',
+  cron: 'Cron',
+}
+
+function getSourceLabel(source?: string): string {
+  if (!source) return ''
+  return sourceLabel[source] || source
+}
+
 // Source sort order: api_server first, cron last, others alphabetical
 function sourceSortKey(source: string): number {
   if (source === 'api_server') return -1
@@ -83,32 +108,6 @@ const activeSessionTitle = computed(() =>
 const activeSessionSource = computed(() =>
   chatStore.activeSession?.source || '',
 )
-
-
-const sourceLabel: Record<string, string> = {
-  telegram: 'Telegram',
-  api_server: 'API Server',
-  cli: 'CLI',
-  discord: 'Discord',
-  slack: 'Slack',
-  matrix: 'Matrix',
-  whatsapp: 'WhatsApp',
-  signal: 'Signal',
-  email: 'Email',
-  sms: 'SMS',
-  dingtalk: 'DingTalk',
-  feishu: 'Feishu',
-  wecom: 'WeCom',
-  weixin: 'WeChat',
-  bluebubbles: 'iMessage',
-  mattermost: 'Mattermost',
-  cron: 'Cron',
-}
-
-function getSourceLabel(source?: string): string {
-  if (!source) return ''
-  return sourceLabel[source] || source
-}
 
 function handleNewChat() {
   chatStore.newChat()
