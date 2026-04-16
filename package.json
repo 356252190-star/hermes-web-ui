@@ -1,6 +1,6 @@
 {
   "name": "hermes-web-ui",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Web dashboard for Hermes Agent — multi-platform AI chat, session management, scheduled jobs, usage analytics & channel configuration (Telegram, Discord, Slack, WhatsApp)",
   "repository": {
     "type": "git",

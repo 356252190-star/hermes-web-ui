@@ -184,17 +184,7 @@ async function ensureApiServerConfig() {
     if (!cfg.platforms) cfg.platforms = {}
     if (!cfg.platforms.api_server) cfg.platforms.api_server = {}
 
-    const api = cfg.platforms.api_server
-    let changed = false
-
-    for (const [k, v] of Object.entries(defaults)) {
-      if (api[k] != null && api[k] !== v) {
-        api[k] = v
-        changed = true
-      }
-    }
-
-    if (!changed) return
+    cfg.platforms.api_server = defaults
 
     copyFileSync(configPath, configPath + '.bak')
     writeFileSync(configPath, yaml.dump(cfg), 'utf-8')
