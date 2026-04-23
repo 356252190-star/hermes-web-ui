@@ -7,6 +7,7 @@ const store = useGroupChatStore()
 
 onMounted(() => {
     store.connect()
+    store.loadRooms()
 })
 
 onUnmounted(() => {

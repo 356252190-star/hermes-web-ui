@@ -1,4 +1,4 @@
-import { Server, Socket } from 'socket.io'
+import { Server, Socket, Namespace } from 'socket.io'
 import type { Server as HttpServer } from 'http'
 import { getToken } from '../../../services/auth'
 import { getDb, ensureTable } from '../../../db'
@@ -186,11 +186,13 @@ class ChatRoom {
 
 export class GroupChatServer {
     private io: Server
+    private nsp: Namespace
     private storage: ChatStorage
     private rooms = new Map<string, ChatRoom>()
     private userNames = new Map<string, string>()
     readonly agentClients = new AgentClients()
     private gatewayManager: any = null
+    private _restoreScheduled = false
 
     setGatewayManager(manager: any): void {
         this.gatewayManager = manager
@@ -202,12 +204,12 @@ export class GroupChatServer {
         this.storage.init()
 
         this.io = new Server(httpServer, {
-            path: '/api/hermes/group-chat/ws',
             cors: { origin: '*' },
-            transports: ['websocket', 'polling'],
+            transports: ['websocket'],
         })
-        this.io.use(this.authMiddleware.bind(this))
-        this.io.on('connection', this.onConnection.bind(this))
+        this.nsp = this.io.of('/group-chat')
+        this.nsp.use(this.authMiddleware.bind(this))
+        this.nsp.on('connection', this.onConnection.bind(this))
 
         // Restore persisted rooms into memory
         this.storage.getAllRooms().forEach((row) => {
@@ -221,8 +223,8 @@ export class GroupChatServer {
         this.agentClients.setContextEngine(contextEngine)
         this.agentClients.setStorage(this.storage)
 
-        // Restore agent connections from SQLite
-        this.restoreAgents()
+        // Restore agent connections — call restoreAgents() after server is listening
+        this._restoreScheduled = false
     }
 
     getIO(): Server {
@@ -238,6 +240,16 @@ export class GroupChatServer {
     }
 
     // ─── Restore Agents ─────────────────────────────────────────
+
+    /**
+     * Restore persisted agent connections. Safe to call multiple times;
+     * will only execute once.
+     */
+    async restoreWhenReady(): Promise<void> {
+        if (this._restoreScheduled) return
+        this._restoreScheduled = true
+        await this.restoreAgents()
+    }
 
     private async restoreAgents(): Promise<void> {
         const rooms = this.storage.getAllRooms()
@@ -355,7 +367,7 @@ export class GroupChatServer {
 
         this.storage.addMessage(msg)
         this.storage.pruneMessages(roomId)
-        this.io.to(roomId).emit('message', msg)
+        this.nsp.to(roomId).emit('message', msg)
         ack?.({ id: msg.id })
     }
 
@@ -394,7 +406,7 @@ export class GroupChatServer {
             if (room.hasMember(userId)) {
                 room.removeMember(userId)
                 socket.leave(rid)
-                this.io.to(rid).emit('member_left', {
+                this.nsp.to(rid).emit('member_left', {
                     roomId: rid,
                     memberId: userId,
                     memberName: userName,

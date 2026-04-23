@@ -10,7 +10,6 @@ function createProxyConfig(): ProxyOptions {
   return {
     target: BACKEND,
     changeOrigin: true,
-    ws: true,
     configure: (proxy) => {
       proxy.on('proxyReq', (proxyReq) => {
         proxyReq.removeHeader('origin')

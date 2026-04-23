@@ -22,11 +22,11 @@ try {
     truncateSync(logFile, 0)
     writeFileSync(logFile, buf)
   }
-} catch {}
+} catch { }
 
 export const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
 }, pino.destination({
   dest: logFile,
-  sync: false,
+  sync: true,
 }))

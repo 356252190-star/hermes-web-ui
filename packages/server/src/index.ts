@@ -99,6 +99,9 @@ export async function bootstrap() {
     console.log(`Log: ~/.hermes-web-ui/logs/server.log`)
     logger.info('Server: http://localhost:%d (LAN: http://%s:%d)', config.port, localIp, config.port)
     logger.info('Upstream: %s', config.upstream)
+
+    // Restore group chat agents after server is ready
+    groupChatServer.restoreWhenReady()
   })
 
   server.on('error', (err: any) => {

@@ -11,6 +11,7 @@ import {
     type JoinResult,
     createRoom,
     listRooms,
+    getRoomDetail,
     joinRoomByCode,
     addAgent,
     listAgents,
@@ -99,33 +100,27 @@ export const useGroupChatStore = defineStore('groupChat', () => {
 
     // ─── Room Actions ──────────────────────────────────────
     async function joinRoom(roomId: string) {
-        const socket = getSocket()
-        if (!socket) return
-
         isJoining.value = true
         error.value = null
 
-        return new Promise<void>((resolve, reject) => {
-            socket!.emit('join', { roomId }, (res: JoinResult | { error: string }) => {
-                isJoining.value = false
-                if ('error' in res) {
-                    error.value = res.error
-                    reject(new Error(res.error))
-                    return
-                }
+        try {
+            const res = await getRoomDetail(roomId)
+            currentRoomId.value = res.room.id
+            roomName.value = res.room.name
+            messages.value = res.messages
+            agents.value = res.agents
+        } catch (err: any) {
+            error.value = err.message
+            throw err
+        } finally {
+            isJoining.value = false
+        }
 
-                currentRoomId.value = res.roomId
-                roomName.value = res.roomName
-                messages.value = res.messages
-                members.value = res.members
-                rooms.value = res.rooms.map(id => ({ id, name: id, inviteCode: null }))
-
-                // Load agents for this room
-                loadAgents(res.roomId)
-
-                resolve()
-            })
-        })
+        // Also join via socket for real-time updates (best-effort)
+        const socket = getSocket()
+        if (socket) {
+            socket.emit('join', { roomId })
+        }
     }
 
     async function sendMessage(content: string) {

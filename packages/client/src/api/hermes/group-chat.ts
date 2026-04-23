@@ -52,9 +52,9 @@ export function connectGroupChat(): ReturnType<typeof io> {
     const baseUrl = getBaseUrlValue()
     const token = getApiKey()
 
-    socket = io(`${baseUrl}/api/hermes/group-chat/ws`, {
+    socket = io(`${baseUrl}/group-chat`, {
         auth: { token: token || undefined },
-        transports: ['polling', 'websocket'],
+        transports: ['websocket'],
         reconnection: true,
         reconnectionAttempts: Infinity,
         reconnectionDelay: 1000,
@@ -91,6 +91,10 @@ export async function createRoom(data: {
 
 export async function listRooms(): Promise<{ rooms: RoomInfo[] }> {
     return request('/api/hermes/group-chat/rooms')
+}
+
+export async function getRoomDetail(roomId: string): Promise<{ room: RoomInfo; messages: ChatMessage[]; agents: RoomAgent[] }> {
+    return request(`/api/hermes/group-chat/rooms/${roomId}`)
 }
 
 export async function joinRoomByCode(code: string): Promise<{ room: RoomInfo }> {

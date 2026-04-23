@@ -90,7 +90,7 @@ class AgentClient {
         this.port = port
         const token = await getToken()
 
-        this.socket = io(`http://127.0.0.1:${port}/api/hermes/group-chat`, {
+        this.socket = io(`http://127.0.0.1:${port}/group-chat`, {
             auth: {
                 token: token || undefined,
                 name: this.name,
@@ -286,14 +286,14 @@ class AgentClient {
                             this.stopTyping(roomId)
                             this.sendMessage(roomId, fullContent)
                         }
-                        this.deleteSession(upstream, apiKey, sessionId).catch(() => {})
+                        this.deleteSession(upstream, apiKey, sessionId).catch(() => { })
                         return
                     }
 
                     if (parsed.event === 'run.failed') {
                         source.close()
                         this.stopTyping(roomId)
-                        this.deleteSession(upstream, apiKey, sessionId).catch(() => {})
+                        this.deleteSession(upstream, apiKey, sessionId).catch(() => { })
                         return
                     }
 

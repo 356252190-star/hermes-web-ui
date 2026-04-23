@@ -60,6 +60,26 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms', async (ctx) => {
     ctx.body = { room, agents: addedAgents }
 })
 
+// Get room detail and messages
+groupChatRoutes.get('/api/hermes/group-chat/rooms/:roomId', async (ctx) => {
+    if (!chatServer) {
+        ctx.status = 503
+        ctx.body = { error: 'Group chat not initialized' }
+        return
+    }
+
+    const room = chatServer.getStorage().getRoom(ctx.params.roomId)
+    if (!room) {
+        ctx.status = 404
+        ctx.body = { error: 'Room not found' }
+        return
+    }
+
+    const messages = chatServer.getStorage().getMessages(ctx.params.roomId)
+    const agents = chatServer.getStorage().getRoomAgents(ctx.params.roomId)
+    ctx.body = { room, messages, agents }
+})
+
 // List rooms
 groupChatRoutes.get('/api/hermes/group-chat/rooms', async (ctx) => {
     if (!chatServer) {
@@ -121,6 +141,14 @@ groupChatRoutes.post('/api/hermes/group-chat/rooms/:roomId/agents', async (ctx) 
     if (!profile) {
         ctx.status = 400
         ctx.body = { error: 'profile is required' }
+        return
+    }
+
+    // Prevent duplicate agent in same room
+    const existing = chatServer.getStorage().getRoomAgents(ctx.params.roomId)
+    if (existing.find(a => a.profile === profile)) {
+        ctx.status = 409
+        ctx.body = { error: 'Agent already in room' }
         return
     }
 

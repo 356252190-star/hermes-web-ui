@@ -61,6 +61,7 @@
     "dist/"
   ],
   "dependencies": {
+    "@multiavatar/multiavatar": "^1.0.7",
     "node-pty": "^1.1.0",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
