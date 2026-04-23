@@ -13,20 +13,29 @@ export interface StoredMessage {
 // ─── Compression Config ────────────────────────────────────
 
 export interface CompressionConfig {
+    /** Token threshold to trigger compression (estimate all messages) */
+    triggerTokens: number
+    /** Max tokens for the final compressed context sent to LLM */
     maxHistoryTokens: number
+    /** Number of recent messages to keep verbatim (tail) */
     tailMessageCount: number
+    /** Number of early messages to keep verbatim (head) */
     headMessageCount: number
+    /** Characters per token for estimation */
     charsPerToken: number
+    /** Cache TTL for summaries in ms */
     summaryTtlMs: number
+    /** Timeout for summarization LLM call in ms */
     summarizationTimeoutMs: number
 }
 
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
-    maxHistoryTokens: 4000,
-    tailMessageCount: 10,
+    triggerTokens: 100_000,
+    maxHistoryTokens: 32_000,
+    tailMessageCount: 20,
     headMessageCount: 4,
     charsPerToken: 4,
-    summaryTtlMs: 120_000,
+    summaryTtlMs: 300_000,
     summarizationTimeoutMs: 30_000,
 }
 

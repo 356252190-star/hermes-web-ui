@@ -10,23 +10,18 @@ export class SummaryCache {
         this.ttlMs = ttlMs
     }
 
-    private key(roomId: string, agentId: string): string {
-        return `${roomId}:${agentId}`
-    }
-
-    get(roomId: string, agentId: string): SummaryCacheEntry | undefined {
-        const entry = this.cache.get(this.key(roomId, agentId))
+    get(roomId: string): SummaryCacheEntry | undefined {
+        const entry = this.cache.get(roomId)
         if (!entry) return undefined
         if (Date.now() - entry.createdAt >= this.ttlMs) {
-            this.cache.delete(this.key(roomId, agentId))
+            this.cache.delete(roomId)
             return undefined
         }
         return entry
     }
 
-    set(roomId: string, agentId: string, entry: SummaryCacheEntry): void {
+    set(roomId: string, entry: SummaryCacheEntry): void {
         if (this.cache.size >= MAX_ENTRIES) {
-            // Evict the oldest entry
             let oldestKey = ''
             let oldestTime = Infinity
             for (const [k, v] of this.cache) {
@@ -37,18 +32,11 @@ export class SummaryCache {
             }
             if (oldestKey) this.cache.delete(oldestKey)
         }
-        this.cache.set(this.key(roomId, agentId), entry)
+        this.cache.set(roomId, entry)
     }
 
-    invalidateRoom(roomId: string): void {
-        const prefix = `${roomId}:`
-        for (const k of this.cache.keys()) {
-            if (k.startsWith(prefix)) this.cache.delete(k)
-        }
-    }
-
-    delete(roomId: string, agentId: string): void {
-        this.cache.delete(this.key(roomId, agentId))
+    invalidate(roomId: string): void {
+        this.cache.delete(roomId)
     }
 
     clear(): void {

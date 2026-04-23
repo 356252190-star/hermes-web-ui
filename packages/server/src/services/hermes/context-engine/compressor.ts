@@ -34,6 +34,7 @@ export class ContextEngine {
         // Filter out messages newer than the current one
         const messages = allMessages.filter(m => m.timestamp <= input.currentMessage.timestamp)
         const total = messages.length
+        const totalTokens = this.estimateTokensFromMessages(messages)
 
         const meta: CompressedContext['meta'] = {
             totalMessages: total,
@@ -51,15 +52,15 @@ export class ContextEngine {
             memberNames: input.memberNames,
         })
 
-        const { headMessageCount, tailMessageCount } = this.config
+        const { triggerTokens, headMessageCount, tailMessageCount } = this.config
 
-        // Short conversation — no summarization needed
-        if (total <= headMessageCount + tailMessageCount) {
+        // Under token threshold — pass all messages verbatim
+        if (totalTokens <= triggerTokens) {
             const history = messages.map(m => this.mapToHistory(m, input.agentSocketId))
             return { conversationHistory: history, instructions, meta }
         }
 
-        // Three-zone split
+        // Over threshold — three-zone split
         const head = messages.slice(0, headMessageCount)
         const tail = messages.slice(-tailMessageCount)
         const middle = messages.slice(headMessageCount, -tailMessageCount)
@@ -68,13 +69,14 @@ export class ContextEngine {
         meta.verbatimTailCount = tail.length
         meta.summarizedCount = middle.length
 
+        console.log(`[ContextEngine] ${input.agentName}: ${total} msgs, ~${totalTokens} tokens > ${triggerTokens}, compressing ${middle.length} middle msgs`)
+
         // Attempt summarization
         let summaryContent: string | null = null
 
         try {
             summaryContent = await this.summarizeMiddle(
                 input.roomId,
-                input.agentId,
                 middle,
                 input.upstream,
                 input.apiKey,
@@ -105,23 +107,18 @@ export class ContextEngine {
     }
 
     invalidateRoom(roomId: string): void {
-        this.cache.invalidateRoom(roomId)
-    }
-
-    invalidateAgent(roomId: string, agentId: string): void {
-        this.cache.delete(roomId, agentId)
+        this.cache.invalidate(roomId)
     }
 
     // ─── Private ─────────────────────────────────────────────
 
     private async summarizeMiddle(
         roomId: string,
-        agentId: string,
         middle: StoredMessage[],
         upstream: string,
         apiKey: string | null,
     ): Promise<string | null> {
-        const cached = this.cache.get(roomId, agentId)
+        const cached = this.cache.get(roomId)
 
         if (cached) {
             // Check if there are new messages since last summary
@@ -140,7 +137,7 @@ export class ContextEngine {
                 cached.summaryContent,
             )
 
-            this.cache.set(roomId, agentId, {
+            this.cache.set(roomId, {
                 summaryContent: summary,
                 lastSummarizedTimestamp: newMessages[newMessages.length - 1].timestamp,
                 createdAt: Date.now(),
@@ -158,7 +155,7 @@ export class ContextEngine {
             middle,
         )
 
-        this.cache.set(roomId, agentId, {
+        this.cache.set(roomId, {
             summaryContent: summary,
             lastSummarizedTimestamp: middle[middle.length - 1].timestamp,
             createdAt: Date.now(),
@@ -191,7 +188,19 @@ export class ContextEngine {
     }
 
     private estimateTokens(history: Array<{ role: string; content: string }>): number {
-        const totalChars = history.reduce((sum, m) => sum + m.content.length, 0)
-        return Math.ceil(totalChars / this.config.charsPerToken)
+        const text = history.map(m => m.content).join('')
+        return this.countTokens(text)
+    }
+
+    private estimateTokensFromMessages(messages: StoredMessage[]): number {
+        const text = messages.map(m => m.content + m.senderName).join('')
+        return this.countTokens(text)
+    }
+
+    /** Estimate tokens distinguishing CJK (~1.5 tok/char) from Latin (~0.25 tok/char) */
+    private countTokens(text: string): number {
+        const cjk = (text.match(/[\u2e80-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/g) || []).length
+        const other = text.length - cjk
+        return Math.ceil(cjk * 1.5 + other / 4)
     }
 }

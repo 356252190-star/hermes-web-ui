@@ -29,6 +29,8 @@ export const useGroupChatStore = defineStore('groupChat', () => {
     const roomName = ref('')
     const isJoining = ref(false)
     const error = ref<string | null>(null)
+    const typingUsers = ref<Map<string, { name: string; timer: ReturnType<typeof setTimeout> }>>(new Map())
+    const contextStatus = ref<{ agentName: string; status: string } | null>(null)
 
     // ─── Computed ───────────────────────────────────────────
     const sortedMessages = computed(() => {
@@ -39,20 +41,36 @@ export const useGroupChatStore = defineStore('groupChat', () => {
         return members.value.map(m => m.name)
     })
 
+    const typingNames = computed(() => {
+        return Array.from(typingUsers.value.values()).map(u => u.name)
+    })
+
+    const typingText = computed(() => {
+        const names = typingNames.value
+        if (names.length === 0) return ''
+        if (names.length === 1) return `${names[0]} is typing...`
+        if (names.length === 2) return `${names[0]} and ${names[1]} are typing...`
+        return `${names[0]} and ${names.length - 1} others are typing...`
+    })
+
     // ─── Connection ────────────────────────────────────────
     function connect() {
         const socket = connectGroupChat()
+        console.log('[GroupChat] connecting...')
 
         socket.on('connect', () => {
+            console.log('[GroupChat] connected, socket id:', socket.id)
             connected.value = true
             error.value = null
         })
 
-        socket.on('disconnect', () => {
+        socket.on('disconnect', (reason) => {
+            console.log('[GroupChat] disconnected:', reason)
             connected.value = false
         })
 
         socket.on('connect_error', (err: Error) => {
+            console.error('[GroupChat] connect_error:', err.message)
             error.value = err.message
             connected.value = false
         })
@@ -76,14 +94,27 @@ export const useGroupChatStore = defineStore('groupChat', () => {
         })
 
         socket.on('typing', (data: { roomId: string; userId: string; userName: string }) => {
-            if (data.roomId === currentRoomId.value) {
-                // Could store typing state per user if needed
+            if (data.roomId === currentRoomId.value && !typingUsers.value.has(data.userId)) {
+                const timer = setTimeout(() => typingUsers.value.delete(data.userId), 5000)
+                typingUsers.value.set(data.userId, { name: data.userName, timer })
             }
         })
 
-        socket.on('stop_typing', (data: { roomId: string }) => {
+        socket.on('stop_typing', (data: { roomId: string; userId: string }) => {
+            if (data.roomId === currentRoomId.value && typingUsers.value.has(data.userId)) {
+                const entry = typingUsers.value.get(data.userId)!
+                clearTimeout(entry.timer)
+                typingUsers.value.delete(data.userId)
+            }
+        })
+
+        socket.on('context_status', (data: { roomId: string; agentName: string; status: string }) => {
             if (data.roomId === currentRoomId.value) {
-                // Could clear typing state
+                if (data.status === 'ready') {
+                    contextStatus.value = null
+                } else {
+                    contextStatus.value = { agentName: data.agentName, status: data.status }
+                }
             }
         })
     }
@@ -96,6 +127,8 @@ export const useGroupChatStore = defineStore('groupChat', () => {
         members.value = []
         agents.value = []
         roomName.value = ''
+        typingUsers.value.clear()
+        contextStatus.value = null
     }
 
     // ─── Room Actions ──────────────────────────────────────
@@ -116,16 +149,24 @@ export const useGroupChatStore = defineStore('groupChat', () => {
             isJoining.value = false
         }
 
-        // Also join via socket for real-time updates (best-effort)
+        // Join via socket for real-time updates
         const socket = getSocket()
         if (socket) {
-            socket.emit('join', { roomId })
+            await new Promise<void>((resolve) => {
+                socket.emit('join', { roomId }, (res: any) => {
+                    if (!res?.error) {
+                        members.value = res.members || []
+                    }
+                    resolve()
+                })
+            })
         }
     }
 
     async function sendMessage(content: string) {
         const socket = getSocket()
         if (!socket || !currentRoomId.value) return
+        emitStopTyping()
 
         return new Promise<void>((resolve, reject) => {
             socket!.emit('message', { roomId: currentRoomId.value, content }, (res: { id?: string; error?: string }) => {
@@ -198,6 +239,24 @@ export const useGroupChatStore = defineStore('groupChat', () => {
         }
     }
 
+    // ─── Typing ────────────────────────────────────────────
+    let _typingTimer: ReturnType<typeof setTimeout> | null = null
+
+    function emitTyping() {
+        const socket = getSocket()
+        if (!socket || !currentRoomId.value) return
+        socket.emit('typing', { roomId: currentRoomId.value })
+        if (_typingTimer) clearTimeout(_typingTimer)
+        _typingTimer = setTimeout(() => emitStopTyping(), 4000)
+    }
+
+    function emitStopTyping() {
+        const socket = getSocket()
+        if (!socket || !currentRoomId.value) return
+        socket.emit('stop_typing', { roomId: currentRoomId.value })
+        if (_typingTimer) { clearTimeout(_typingTimer); _typingTimer = null }
+    }
+
     return {
         // State
         connected,
@@ -209,15 +268,20 @@ export const useGroupChatStore = defineStore('groupChat', () => {
         roomName,
         isJoining,
         error,
+        contextStatus,
         // Computed
         sortedMessages,
         memberNames,
+        typingNames,
+        typingText,
         // Actions
         connect,
         disconnect,
         joinRoom,
         sendMessage,
         loadRooms,
+        emitTyping,
+        emitStopTyping,
         createNewRoom,
         joinByCode,
         loadAgents,

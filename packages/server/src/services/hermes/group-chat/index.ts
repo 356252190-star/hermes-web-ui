@@ -123,7 +123,8 @@ class ChatStorage {
                 'SELECT timestamp FROM gc_messages WHERE roomId = ? ORDER BY timestamp DESC LIMIT 1 OFFSET ?'
             ).get(roomId, keep - 1) as any
             if (cutoff) {
-                db.prepare('DELETE FROM gc_messages WHERE roomId = ? AND timestamp < ?').run(roomId, cutoff.timestamp)
+                const result = db.prepare('DELETE FROM gc_messages WHERE roomId = ? AND timestamp < ?').run(roomId, cutoff.timestamp)
+                console.log(`[GroupChat] pruned ${result.changes} messages from room ${roomId} (had ${count}, keeping ${keep})`)
             }
         }
     }
@@ -204,8 +205,7 @@ export class GroupChatServer {
         this.storage.init()
 
         this.io = new Server(httpServer, {
-            cors: { origin: '*' },
-            transports: ['websocket'],
+            cors: { origin: '*' }
         })
         this.nsp = this.io.of('/group-chat')
         this.nsp.use(this.authMiddleware.bind(this))
@@ -222,6 +222,7 @@ export class GroupChatServer {
         const contextEngine = new ContextEngine({ messageFetcher: this.storage })
         this.agentClients.setContextEngine(contextEngine)
         this.agentClients.setStorage(this.storage)
+        this.agentClients.setNamespace(this.nsp)
 
         // Restore agent connections — call restoreAgents() after server is listening
         this._restoreScheduled = false
@@ -282,8 +283,9 @@ export class GroupChatServer {
 
     private async authMiddleware(socket: Socket, next: (err?: Error) => void): Promise<void> {
         const authToken = await getToken()
+        const token = socket.handshake.auth.token || socket.handshake.query.token || ''
+        console.log(`[GroupChat] auth check: received="${token}", expected="${authToken}"`)
         if (authToken) {
-            const token = socket.handshake.auth.token || socket.handshake.query.token || ''
             if (token !== authToken) {
                 return next(new Error('Unauthorized'))
             }
@@ -355,7 +357,7 @@ export class GroupChatServer {
             ack?.({ error: 'Not in room' })
             return
         }
-
+        console.log(data.content)
         const msg: ChatMessage = {
             id: this.generateId(),
             roomId,
@@ -369,6 +371,15 @@ export class GroupChatServer {
         this.storage.pruneMessages(roomId)
         this.nsp.to(roomId).emit('message', msg)
         ack?.({ id: msg.id })
+
+        // Server-side @mention routing — parse mentions and invoke agents directly
+        this.agentClients.processMentions(roomId, {
+            content: msg.content,
+            senderName: msg.senderName,
+            senderId: msg.senderId,
+        }).catch((err) => {
+            console.error(`[GroupChat] processMentions error: ${err.message}`)
+        })
     }
 
     private handleTyping(socket: Socket, data: { roomId?: string }): void {

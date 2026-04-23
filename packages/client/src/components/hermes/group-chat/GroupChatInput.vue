@@ -1,18 +1,148 @@
 <script setup lang="ts">
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NButton } from 'naive-ui'
+import { NButton, NDropdown } from 'naive-ui'
+import { useGroupChatStore } from '@/stores/hermes/group-chat'
+import type { DropdownOption } from 'naive-ui'
 
 const { t } = useI18n()
 const emit = defineEmits<{ send: [content: string] }>()
+const store = useGroupChatStore()
 
 const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
 const isComposing = ref(false)
 
+// ─── Mention State ───────────────────────────────────────
+
+const mentionActive = ref(false)
+const mentionQuery = ref('')
+const mentionStartIndex = ref(-1)
+const dropdownX = ref(0)
+const dropdownY = ref(0)
+const activeIndex = ref(0)
+
+const filteredAgents = computed(() => {
+    const query = mentionQuery.value.toLowerCase()
+    return store.agents.filter(a => a.name.toLowerCase().includes(query))
+})
+
+const dropdownOptions = computed<DropdownOption[]>(() => {
+    return filteredAgents.value.map((a, i) => ({
+        label: `${a.name}  (${a.profile})`,
+        key: a.name,
+        index: i,
+    }))
+})
+
 const canSend = computed(() => !!inputText.value.trim())
 
+// ─── Mention Logic ───────────────────────────────────────
+
+function updateMentionState() {
+    const el = textareaRef.value
+    if (!el) { mentionActive.value = false; return }
+
+    const text = inputText.value
+    const cursorPos = el.selectionStart
+
+    // Find the last @ before the cursor
+    let atPos = -1
+    for (let i = cursorPos - 1; i >= 0; i--) {
+        if (text[i] === '@') { atPos = i; break }
+        if (text[i] === ' ' || text[i] === '\n') break
+    }
+
+    if (atPos === -1) {
+        mentionActive.value = false
+        return
+    }
+
+    // Make sure the @ is not part of a word (preceded by space or start of line)
+    if (atPos > 0 && text[atPos - 1] !== ' ' && text[atPos - 1] !== '\n') {
+        mentionActive.value = false
+        return
+    }
+
+    const query = text.slice(atPos + 1, cursorPos)
+    if (query.includes(' ')) {
+        mentionActive.value = false
+        return
+    }
+
+    mentionQuery.value = query
+    mentionStartIndex.value = atPos
+    activeIndex.value = 0
+
+    // Calculate dropdown position
+    const mirror = document.createElement('span')
+    const style = getComputedStyle(el)
+    const props = ['fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'textTransform', 'wordSpacing', 'textIndent', 'whiteSpace', 'border', 'padding', 'boxSizing', 'lineHeight']
+    props.forEach(p => { (mirror.style as any)[p] = style[p as any] })
+    mirror.style.position = 'absolute'
+    mirror.style.visibility = 'hidden'
+    mirror.style.whiteSpace = 'pre-wrap'
+    mirror.style.width = el.offsetWidth + 'px'
+    mirror.textContent = text.slice(0, atPos + 1)
+
+    const rect = el.getBoundingClientRect()
+    document.body.appendChild(mirror)
+    const mirrorRect = mirror.getBoundingClientRect()
+    document.body.removeChild(mirror)
+
+    dropdownX.value = rect.left + mirrorRect.width - el.scrollLeft
+    dropdownY.value = rect.top + mirrorRect.height - el.scrollTop - 4
+
+    mentionActive.value = filteredAgents.value.length > 0
+}
+
+function selectMention(name: string) {
+    const el = textareaRef.value
+    if (!el || mentionStartIndex.value === -1) return
+
+    const before = inputText.value.slice(0, mentionStartIndex.value)
+    const after = inputText.value.slice(el.selectionStart)
+    inputText.value = `${before}@${name} ${after}`
+    mentionActive.value = false
+
+    nextTick(() => {
+        if (el) {
+            const newPos = before.length + name.length + 2
+            el.setSelectionRange(newPos, newPos)
+            el.focus()
+            el.style.height = 'auto'
+            el.style.height = Math.min(el.scrollHeight, 100) + 'px'
+        }
+    })
+}
+
+// ─── Event Handlers ──────────────────────────────────────
+
 function handleKeydown(e: KeyboardEvent) {
+    // Mention navigation
+    if (mentionActive.value && filteredAgents.value.length > 0) {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            activeIndex.value = (activeIndex.value + 1) % filteredAgents.value.length
+            return
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            activeIndex.value = (activeIndex.value - 1 + filteredAgents.value.length) % filteredAgents.value.length
+            return
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault()
+            selectMention(filteredAgents.value[activeIndex.value].name)
+            return
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault()
+            mentionActive.value = false
+            return
+        }
+    }
+
     if (e.key !== 'Enter' || e.shiftKey) return
     if (isComposing.value || e.isComposing || e.keyCode === 229) return
     e.preventDefault()
@@ -25,6 +155,7 @@ function handleSend() {
 
     emit('send', content)
     inputText.value = ''
+    mentionActive.value = false
 
     nextTick(() => {
         if (textareaRef.value) {
@@ -34,9 +165,22 @@ function handleSend() {
 }
 
 function handleInput(e: Event) {
+    store.emitTyping()
     const el = e.target as HTMLTextAreaElement
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 100) + 'px'
+
+    if (!isComposing.value) {
+        updateMentionState()
+    }
+}
+
+function handleDropdownSelect(key: string) {
+    selectMention(key)
+}
+
+function handleDropdownClickOutside() {
+    mentionActive.value = false
 }
 
 function handleCompositionStart() {
@@ -46,12 +190,32 @@ function handleCompositionStart() {
 function handleCompositionEnd() {
     requestAnimationFrame(() => {
         isComposing.value = false
+        updateMentionState()
     })
 }
 </script>
 
 <template>
     <div class="chat-input-area">
+        <div v-if="store.contextStatus" class="context-status">
+            <svg class="context-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+                <path v-if="store.contextStatus.status === 'compressing'" d="M12 6v6l4 2" />
+                <path v-else d="M9 12l2 2 4-4" />
+            </svg>
+            <span v-if="store.contextStatus.status === 'compressing'">
+                @{{ store.contextStatus.agentName }} is compressing context...
+            </span>
+            <span v-else>
+                @{{ store.contextStatus.agentName }} is replying...
+            </span>
+        </div>
+        <div v-if="store.typingText && !store.contextStatus" class="typing-indicator">
+            <span class="typing-dots">
+                <span /><span /><span />
+            </span>
+            {{ store.typingText }}
+        </div>
         <div class="input-wrapper">
             <textarea
                 ref="textareaRef"
@@ -78,6 +242,17 @@ function handleCompositionEnd() {
                 </NButton>
             </div>
         </div>
+        <NDropdown
+            placement="top-start"
+            trigger="manual"
+            :x="dropdownX"
+            :y="dropdownY"
+            :options="dropdownOptions"
+            :show="mentionActive"
+            :render-icon="() => null"
+            @select="handleDropdownSelect"
+            @clickoutside="handleDropdownClickOutside"
+        />
     </div>
 </template>
 
@@ -88,6 +263,64 @@ function handleCompositionEnd() {
     padding: 12px 20px 16px;
     border-top: 1px solid $border-color;
     flex-shrink: 0;
+}
+
+.typing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 4px 8px;
+    font-size: 12px;
+    color: $text-muted;
+}
+
+.context-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: $text-secondary;
+    background-color: $bg-hover;
+    border-radius: $radius-sm;
+
+    .dark & {
+        background-color: rgba(255, 255, 255, 0.06);
+    }
+}
+
+.context-icon {
+    flex-shrink: 0;
+    animation: context-pulse 1.5s infinite;
+}
+
+@keyframes context-pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+}
+
+.typing-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+
+    span {
+        display: block;
+        width: 4px;
+        height: 4px;
+        border-radius: 50%;
+        background-color: $text-muted;
+        animation: typing-bounce 1.2s infinite;
+
+        &:nth-child(2) { animation-delay: 0.2s; }
+        &:nth-child(3) { animation-delay: 0.4s; }
+    }
+}
+
+@keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-3px); opacity: 1; }
 }
 
 .input-wrapper {

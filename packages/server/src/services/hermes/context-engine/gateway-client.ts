@@ -69,8 +69,7 @@ export class GatewaySummarizer implements GatewayCaller {
             const output = await this.pollForResult(upstream, apiKey, run_id)
             return output
         } finally {
-            // Fire-and-forget session cleanup
-            this.deleteSession(upstream, apiKey, sessionId).catch(() => {})
+            // Note: no session cleanup needed — Hermes manages sessions internally
         }
     }
 
@@ -114,15 +113,4 @@ export class GatewaySummarizer implements GatewayCaller {
         })
     }
 
-    private async deleteSession(upstream: string, apiKey: string | null, sessionId: string): Promise<void> {
-        try {
-            await fetch(`${upstream}/v1/sessions/${sessionId}`, {
-                method: 'DELETE',
-                headers: {
-                    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-                },
-                signal: AbortSignal.timeout(10000),
-            })
-        } catch { /* ignore cleanup errors */ }
-    }
 }

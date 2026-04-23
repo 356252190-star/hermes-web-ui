@@ -1,5 +1,5 @@
 import { io } from 'socket.io-client'
-import { request } from '../client'
+import { request, getApiKey } from '../client'
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -49,10 +49,9 @@ let socket: ReturnType<typeof io> | null = null
 export function connectGroupChat(): ReturnType<typeof io> {
     if (socket?.connected) return socket
 
-    const baseUrl = getBaseUrlValue()
     const token = getApiKey()
 
-    socket = io(`${baseUrl}/group-chat`, {
+    socket = io('/group-chat', {
         auth: { token: token || undefined },
         transports: ['websocket'],
         reconnection: true,
@@ -132,14 +131,3 @@ export async function removeAgent(roomId: string, agentId: string): Promise<void
     })
 }
 
-// ─── Helpers ────────────────────────────────────────────────
-
-function getBaseUrlValue(): string {
-    const stored = localStorage.getItem('serverUrl')
-    if (stored) return stored.replace(/\/$/, '')
-    return ''
-}
-
-function getApiKey(): string {
-    return localStorage.getItem('apiKey') || ''
-}

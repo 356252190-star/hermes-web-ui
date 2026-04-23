@@ -9,7 +9,7 @@ import { mkdir } from 'fs/promises'
 import { readFileSync } from 'fs'
 import { config } from './config'
 import { getToken, requireAuth } from './services/auth'
-import { initGatewayManager } from './services/gateway-bootstrap'
+import { initGatewayManager, getGatewayManagerInstance } from './services/gateway-bootstrap'
 import { bindShutdown } from './services/shutdown'
 import { setupTerminalWebSocket } from './routes/hermes/terminal'
 import { startVersionCheck } from './routes/health'
@@ -90,6 +90,15 @@ export async function bootstrap() {
   // Group chat Socket.IO (must be after server is created)
   const groupChatServer = new GroupChatServer(server)
   setGroupChatServer(groupChatServer)
+  groupChatServer.setGatewayManager(getGatewayManagerInstance())
+
+  // Catch-all: destroy upgrade requests not handled by terminal or Socket.IO
+  server.on('upgrade', (req: any, socket: any) => {
+    const url = new URL(req.url || '', `http://${req.headers.host}`)
+    if (url.pathname !== '/api/hermes/terminal' && !url.pathname.startsWith('/socket.io/')) {
+      socket.destroy()
+    }
+  })
 
   server.on('listening', () => {
     const interfaces = os.networkInterfaces()
@@ -109,7 +118,7 @@ export async function bootstrap() {
     logger.error({ err }, 'Server error')
   })
 
-  bindShutdown(server)
+  bindShutdown(server, groupChatServer)
   startVersionCheck()
 }
 
