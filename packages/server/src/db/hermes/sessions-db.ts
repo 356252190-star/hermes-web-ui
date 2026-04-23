@@ -406,6 +406,7 @@ export async function searchSessionSummaries(
     })
     return items.slice(0, limit)
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
     if (containsCjk(normalized)) {
       const likeRows = runLiteralContentSearch(db, source, trimmed, limit)
       const merged = new Map<string, HermesSessionSearchRow>()
@@ -427,7 +428,22 @@ export async function searchSessionSummaries(
       return items.slice(0, limit)
     }
 
-    const message = err instanceof Error ? err.message : String(err)
+    if (isNumericQuery(trimmed) || hasUnsafeChars(trimmed)) {
+      const likeRows = runLikeContentSearch(db, source, trimmed)
+      const merged = new Map<string, HermesSessionSearchRow>()
+      for (const row of titleRows) {
+        const mapped = mapSearchRow(row)
+        merged.set(mapped.id, mapped)
+      }
+      for (const row of likeRows) {
+        const mapped = mapSearchRow(row)
+        if (!merged.has(mapped.id)) {
+          merged.set(mapped.id, mapped)
+        }
+      }
+      return [...merged.values()].slice(0, limit)
+    }
+
     throw new Error(`Failed to search sessions: ${message}`)
   } finally {
     db.close()

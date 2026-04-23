@@ -44,6 +44,8 @@
 - Markdown rendering with syntax highlighting and code copy
 - Tool call detail expansion (arguments / result)
 - File upload support
+- File download support — download user-uploaded files and agent-generated files across local, Docker, SSH, and Singularity backends
+- Session search — Ctrl+K global search across all conversations
 - Global model selector — discovers models from `~/.hermes/auth.json` credential pool
 - Per-session model display badge and context token usage
 
@@ -86,7 +88,8 @@ Unified configuration for **8 platforms** in one page:
 - Auto-discover models from credential pool (`~/.hermes/auth.json`)
 - Fetch available models from each provider endpoint (`/v1/models`)
 - Add, update, and delete providers (preset & custom OpenAI-compatible)
-- OpenAI Codex OAuth login for Codex models
+- OpenAI Codex & Nous Portal OAuth login
+- Provider URL auto-detection for non-v1 API versions (e.g. `/v4`)
 - Provider-level model grouping with default model switching
 
 ### Multi-Profile & Gateway
@@ -97,6 +100,13 @@ Unified configuration for **8 platforms** in one page:
 - Multi-gateway management — start, stop, and monitor gateway per profile
 - Auto port conflict resolution
 - Profile-scoped configuration and cache isolation
+
+### File Browser
+
+- Browse files on remote backends (local, Docker, SSH, Singularity)
+- Upload, download, rename, copy, move, and delete files
+- Create directories
+- View file content with syntax highlighting
 
 ### Skills & Memory
 
@@ -109,6 +119,12 @@ Unified configuration for **8 platforms** in one page:
 - View agent / gateway / error logs
 - Filter by log level, log file, and keyword
 - Structured log parsing with HTTP access log highlighting
+
+### Authentication
+
+- Token-based auth (auto-generated on first run or set via `AUTH_TOKEN` env var)
+- Optional username/password login — set via settings page after initial token auth
+- Auth can be disabled with `AUTH_DISABLED=1`
 
 ### Settings
 
@@ -235,7 +251,7 @@ Browser → BFF (Koa, :8648) → Hermes Gateway (:8642)
 
 The frontend is designed with **multi-agent extensibility** — all Hermes-specific code is namespaced under `hermes/` directories (API, components, views, stores), making it straightforward to add new agent integrations alongside.
 
-The BFF layer handles API proxy (with path rewriting), SSE streaming, file upload, session CRUD via CLI, config/credential management, WeChat QR login, model discovery, skills/memory management, log reading, and static file serving.
+The BFF layer handles API proxy (with path rewriting), SSE streaming, file upload and download (multi-backend: local/Docker/SSH/Singularity), session CRUD via CLI, config/credential management, WeChat QR login, model discovery, skills/memory management, log reading, and static file serving.
 
 ## Tech Stack
 
