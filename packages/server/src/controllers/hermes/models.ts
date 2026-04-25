@@ -15,6 +15,18 @@ export async function getAvailable(ctx: any) {
     if (typeof modelSection === 'object' && modelSection !== null) {
       currentDefault = String(modelSection.default || '').trim()
       currentDefaultProvider = String(modelSection.provider || '').trim()
+      // When hermes CLI sets provider: custom, resolve to custom:name
+      // by matching base_url + model against custom_providers
+      if (currentDefaultProvider === 'custom' && currentDefault) {
+        const cps = Array.isArray(config.custom_providers) ? config.custom_providers as any[] : []
+        const match = cps.find(
+          (cp: any) => cp.base_url?.replace(/\/+$/, '') === String(modelSection.base_url || '').replace(/\/+$/, '')
+            && cp.model === currentDefault,
+        )
+        if (match) {
+          currentDefaultProvider = `custom:${match.name.trim().toLowerCase().replace(/ /g, '-')}`
+        }
+      }
     } else if (typeof modelSection === 'string') {
       currentDefault = modelSection.trim()
     }
@@ -137,10 +149,8 @@ export async function setConfigModel(ctx: any) {
   }
   try {
     const config = await readConfigYaml()
-    if (typeof config.model !== 'object' || config.model === null) { config.model = {} }
+    config.model = {}
     config.model.default = defaultModel
-    delete config.model.base_url
-    delete config.model.api_key
     if (reqProvider) { config.model.provider = reqProvider }
     await writeConfigYaml(config)
     ctx.body = { success: true }
