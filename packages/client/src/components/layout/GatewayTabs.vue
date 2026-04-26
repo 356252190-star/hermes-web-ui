@@ -308,12 +308,21 @@ onMounted(() => {
   flex: 1;
   min-width: 0;
 
-  // Hide scrollbar but keep scrollable
+  // Subtle scrollbar on desktop — thin enough to not clutter, visible enough to signal scrollability
   &::-webkit-scrollbar {
-    display: none;
+    height: 3px;
   }
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+  &::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.3);
+    border-radius: 2px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  scrollbar-width: thin;
+
+  // iOS: enable momentum touch scrolling
+  -webkit-overflow-scrolling: touch;
 }
 
 .tabs-empty {
@@ -336,7 +345,10 @@ onMounted(() => {
   white-space: nowrap;
   max-width: 130px;
   transition: all $transition-fast;
-  flex-shrink: 0;
+
+  // Allow buttons to shrink when space is tight, text will be ellipsized by .tab-name
+  flex-shrink: 1;
+  min-width: 0;
 
   &:hover:not(:disabled) {
     background: var(--bg-card-hover);
@@ -360,6 +372,11 @@ onMounted(() => {
 
   &:disabled {
     cursor: not-allowed;
+  }
+
+  // Ensure min tap target size on mobile (48px touch target)
+  @media (max-width: 768px) {
+    min-height: 32px;
   }
 }
 
@@ -392,6 +409,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .add-btn {
@@ -419,6 +437,16 @@ onMounted(() => {
   .tooltip-detail {
     font-size: 11px;
     color: rgba(255, 255, 255, 0.7);
+  }
+}
+
+// Mobile: hide scrollbar for clean look, rely on touch momentum scrolling
+@media (max-width: 768px) {
+  .tabs-list {
+    &::-webkit-scrollbar {
+      height: 0;
+    }
+    scrollbar-width: none;
   }
 }
 </style>
