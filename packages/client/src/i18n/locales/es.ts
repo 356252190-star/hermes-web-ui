@@ -144,7 +144,6 @@ export default {
     clickToSelectImage: 'Haz clic para seleccionar una imagen',
     imageTooLarge: 'Imagen demasiado grande (máx 5MB)',
     changeAvatar: 'Cambiar avatar',
- (feat: add custom avatar upload with image cropping)
   },
 
   // Jobs

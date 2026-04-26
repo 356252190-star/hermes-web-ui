@@ -144,7 +144,6 @@ export default {
     clickToSelectImage: '이미지를 선택하려면 클릭하세요',
     imageTooLarge: '이미지가 너무 큽니다 (최대 5MB)',
     changeAvatar: '아바타 변경',
- (feat: add custom avatar upload with image cropping)
   },
 
   // 예약 작업

@@ -167,7 +167,6 @@ export default {
     clickToSelectImage: '点击选择图片',
     imageTooLarge: '图片过大（最大5MB）',
     changeAvatar: '更换头像',
- (feat: add custom avatar upload with image cropping)
   },
 
   // 定时任务
