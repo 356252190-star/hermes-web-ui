@@ -1,22 +1,24 @@
 [Unit]
-Description=Hermes Web UI Watchdog
+Description=Hermes Web UI Watchdog — Crash recovery and auto-restart
 After=network.target
-Wants=network-online.target
+Documentation=https://github.com/EKKOLearnAI/hermes-web-ui
 
 [Service]
 Type=simple
-ExecStart=/bin/bash %h/.hermes-web-ui/watchdog.sh
-Restart=always
+ExecStart=/bin/bash /opt/hermes-web-ui/scripts/watchdog.sh run
+Restart=on-failure
 RestartSec=10
-Environment=PORT=8648
-Environment=CHECK_INTERVAL=30
-Environment=MAX_RETRIES=3
+StandardOutput=append:/var/log/hermes-web-ui-watchdog.log
+StandardError=append:/var/log/hermes-web-ui-watchdog.log
 
-# Security hardening
+# Security (no ProtectSystem=strict — watchdog needs write access
+# for npm install, module repair, and state files)
 NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=%h/.hermes-web-ui
-ProtectHome=false
+PrivateTmp=false
+
+# Environment
+Environment=HEALTH_URL=http://localhost:8648/api/health
+Environment=CHECK_INTERVAL=30
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
