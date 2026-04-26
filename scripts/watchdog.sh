@@ -1,669 +1,687 @@
 #!/usr/bin/env bash
-#
-# hermes-web-ui watchdog — automatic crash recovery with self-healing
-#
-# Four-phase recovery:
-#   Phase 1: Fast restart (simple crashes)
-#   Phase 2: Auto-diagnose + targeted fix (known patterns)
-#   Phase 3: Agent-triggered repair (unknown errors, fully automatic)
-#   Phase 4: Manual intervention report (last resort)
-#
-# Usage:
-#   ./watchdog.sh [options]
-#
-# Options:
-#   --port PORT        Web-UI port (default: 8648)
-#   --interval SEC     Check interval in seconds (default: 30)
-#   --max-retries N    Max Phase 1 restart attempts (default: 3)
-#   --log-dir DIR      Log directory (default: ~/.hermes-web-ui/logs)
-#   --restart-cmd CMD  Custom restart command
-#   --state-file PATH  Persistent state (default: ~/.hermes-web-ui/watchdog-state)
-#   --agent-timeout SEC  Agent repair timeout (default: 300)
-#   --dry-run          Only detect, don't restart
-#
+# ============================================================================
+# hermes-web-ui Watchdog v2.0 — Cross-platform crash recovery
+# ============================================================================
+# Requirements: bash 3.2+, curl, standard POSIX utils
+# Compatibility: Linux (systemd/sysvinit), macOS (launchd/manual)
+# ============================================================================
 
 set -euo pipefail
 
-# --- Defaults ---
-PORT="${PORT:-8648}"
+# ── Configuration ──────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEALTH_URL="${HEALTH_URL:-http://localhost:8648/api/health}"
+START_CMD="${START_CMD:-}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
-LOG_DIR="${LOG_DIR:-$HOME/.hermes-web-ui/logs}"
-STATE_FILE="${STATE_FILE:-$HOME/.hermes-web-ui/watchdog-state}"
-RESTART_CMD="${RESTART_CMD:-}"
-HEALTH_URL="http://127.0.0.1:${PORT}/health"
-MAINTENANCE_FILE="$HOME/.hermes-web-ui/.maintenance"
-AGENT_TIMEOUT="${AGENT_TIMEOUT:-300}"
-DRY_RUN=false
+COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-300}"
+MAX_DAILY_FAILURES="${MAX_DAILY_FAILURES:-30}"
+STATE_DIR="${STATE_DIR:-$HOME/.hermes-web-ui}"
+STATE_FILE="$STATE_DIR/watchdog.state"
+LOG_DIR="${STATE_DIR}/logs"
+WATCHDOG_LOG="${LOG_DIR}/watchdog-$(date +%Y%m%d).log"
+LOCKFILE="/tmp/hermes-web-ui-watchdog.pid"
 
-# --- Phase config ---
-PHASE2_MAX_DIAGNOSES=3   # Max Phase 2 attempts per day
-PHASE3_MAX_ATTEMPTS=2    # Max Phase 3 agent triggers per day
-DAILY_GLOBAL_LIMIT=30    # Hard stop: total failures per day
-
-# --- Parse CLI args ---
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --port) PORT="$2"; HEALTH_URL="http://127.0.0.1:${PORT}/health"; shift 2 ;;
-        --interval) CHECK_INTERVAL="$2"; shift 2 ;;
-        --max-retries) MAX_RETRIES="$2"; shift 2 ;;
-        --log-dir) LOG_DIR="$2"; shift 2 ;;
-        --restart-cmd) RESTART_CMD="$2"; shift 2 ;;
-        --state-file) STATE_FILE="$2"; shift 2 ;;
-        --agent-timeout) AGENT_TIMEOUT="$2"; shift 2 ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
-    esac
-done
-
-# --- Setup ---
-mkdir -p "$LOG_DIR" "$(dirname "$STATE_FILE")"
-CRASH_SIGNAL="$LOG_DIR/CRASH_SIGNAL"
-CONSECUTIVE_FAILURES=0
-TOTAL_FAILURES_TODAY=0
-PHASE2_COUNT=0
-PHASE3_COUNT=0
-LAST_RESET_DATE=""
-
-# Load persistent state
-if [[ -f "$STATE_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$STATE_FILE" 2>/dev/null || true
+# ── Source shared library ──────────────────────────────────────────────────
+if [ -f "$SCRIPT_DIR/error-classify.sh" ]; then
+    source "$SCRIPT_DIR/error-classify.sh"
+else
+    echo "FATAL: error-classify.sh not found in $SCRIPT_DIR" >&2
+    exit 1
 fi
 
-# Reset daily counter
-TODAY=$(date '+%Y-%m-%d')
-if [[ "${LAST_RESET_DATE:-}" != "$TODAY" ]]; then
-    TOTAL_FAILURES_TODAY=0
-    PHASE2_COUNT=0
-    PHASE3_COUNT=0
-fi
+# ── Auto-detect start command ──────────────────────────────────────────────
+detect_start_cmd() {
+    if [ -n "$START_CMD" ]; then
+        return
+    fi
 
+    # Dev directory with package.json
+    if [ -f "$HOME/hermes-web-ui-dev/package.json" ]; then
+        local node_bin="$HOME/hermes-web-ui-dev/node_modules/.bin/tsx"
+        if [ -f "$node_bin" ]; then
+            START_CMD="node $HOME/hermes-web-ui-dev/node_modules/.bin/tsx $HOME/hermes-web-ui-dev/packages/server/src/index.ts"
+            log_info "Detected dev installation at $HOME/hermes-web-ui-dev"
+            return
+        fi
+    fi
+
+    # Global npm installation
+    if command -v hermes-web-ui >/dev/null 2>&1; then
+        START_CMD="hermes-web-ui"
+        log_info "Detected global npm installation"
+        return
+    fi
+
+    # Global npx
+    if command -v npx >/dev/null 2>&1; then
+        START_CMD="npx hermes-web-ui"
+        log_info "Detected npx installation"
+        return
+    fi
+
+    log_error "No hermes-web-ui installation found. Set START_CMD environment variable."
+    exit 1
+}
+
+# ── Logging ────────────────────────────────────────────────────────────────
+setup_logging() {
+    mkdir -p "$LOG_DIR"
+}
+
+log_info() {
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] INFO: $*" | tee -a "$WATCHDOG_LOG"
+}
+
+log_warn() {
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] WARN: $*" | tee -a "$WATCHDOG_LOG"
+}
+
+log_error() {
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "[$ts] ERROR: $*" | tee -a "$WATCHDOG_LOG"
+}
+
+# ── State management (safe key=value parsing, no source) ───────────────────
 save_state() {
-    cat > "$STATE_FILE" <<EOF
-# Auto-generated by watchdog — do not edit
-TOTAL_FAILURES_TODAY=$TOTAL_FAILURES_TODAY
-PHASE2_COUNT=$PHASE2_COUNT
-PHASE3_COUNT=$PHASE3_COUNT
-LAST_RESET_DATE=$TODAY
-LAST_CRASH_TIME=${LAST_CRASH_TIME:-0}
+    local key="$1"
+    local value="$2"
+    mkdir -p "$STATE_DIR"
+
+    if [ -f "$STATE_FILE" ]; then
+        if is_linux; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$STATE_FILE"
+        else
+            # macOS sed requires empty string after -i
+            local tmp="${STATE_FILE}.tmp"
+            sed "s|^${key}=.*|${key}=${value}|" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+        fi
+    fi
+
+    # Key not found? Append it
+    if ! grep -q "^${key}=" "$STATE_FILE" 2>/dev/null; then
+        echo "${key}=${value}" >> "$STATE_FILE"
+    fi
+}
+
+init_state() {
+    mkdir -p "$STATE_DIR"
+    if [ ! -f "$STATE_FILE" ]; then
+        cat > "$STATE_FILE" <<'EOF'
+CONSECUTIVE_FAILURES=0
+LAST_FAILURE_TIME=0
+DAILY_FAILURES=0
+DAILY_FAILURE_DATE=
+MAINTENANCE_MODE=0
 EOF
+        log_info "Initialized state file at $STATE_FILE"
+    fi
 }
 
-# --- Functions ---
-timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
-
-log() {
-    echo "[$(timestamp)] [watchdog] $*"
+get_state() {
+    read_state_value "$STATE_FILE" "$1" "$2"
 }
 
-is_maintenance_mode() {
-    [[ -f "$MAINTENANCE_FILE" ]]
+# ── Process health check ──────────────────────────────────────────────────
+is_webui_running() {
+    curl -sf --connect-timeout 5 --max-time 10 "$HEALTH_URL" > /dev/null 2>&1
 }
 
-check_process_alive() {
-    pgrep -f "hermes-web-ui.*dist/server" >/dev/null 2>&1
+find_webui_pids() {
+    if is_linux; then
+        pgrep -f "hermes-web-ui|tsx.*server/src/index" 2>/dev/null || true
+    else
+        # macOS: use pgrep without -f (not supported on all versions)
+        pgrep -fl "tsx|hermes-web-ui" 2>/dev/null | grep -v grep | awk '{print $1}' || true
+    fi
 }
 
-check_health() {
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "$HEALTH_URL" 2>/dev/null || echo "000")
-    [[ "$http_code" == "200" ]]
-}
+kill_webui_gracefully() {
+    local pids
+    pids="$(find_webui_pids)"
+    if [ -z "$pids" ]; then
+        return
+    fi
 
-wait_for_port_free() {
-    local max_wait=10
+    log_info "Sending SIGTERM to PIDs: $pids"
+    for pid in $pids; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+
+    # Wait up to 10s for graceful shutdown
     local waited=0
-    while [[ $waited -lt $max_wait ]]; do
-        if ! lsof -i :"$PORT" >/dev/null 2>&1; then
+    while [ $waited -lt 10 ]; do
+        local still_alive=false
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                still_alive=true
+                break
+            fi
+        done
+        if [ "$still_alive" = false ]; then
+            log_info "All processes terminated gracefully"
+            return
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    # Force kill remaining
+    log_warn "Force killing remaining PIDs"
+    for pid in $pids; do
+        kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 1
+}
+
+wait_for_port_release() {
+    local port
+    port=$(echo "$HEALTH_URL" | grep -oE ':[0-9]+' | tr -d ':' || echo "8648")
+    local waited=0
+    while [ $waited -lt 10 ]; do
+        if ! port_in_use "$port"; then
+            return 0
+        fi
+        log_info "Port $port still in use, waiting... ($waited/10)"
+        sleep 1
+        waited=$((waited + 1))
+    done
+    log_warn "Port $port still in use after 10s"
+    return 1
+}
+
+# ── RESTART_CMD validation (safe, no eval) ────────────────────────────────
+validate_restart_cmd() {
+    if [ -z "$START_CMD" ]; then
+        log_error "START_CMD is empty, cannot restart"
+        return 1
+    fi
+    # Only allow safe characters: alphanumeric, space, /, -, _, ., =, :, @
+    if echo "$START_CMD" | grep -qE '^[a-zA-Z0-9/_.:@= -]+$'; then
+        return 0
+    else
+        log_error "START_CMD contains unsafe characters: $START_CMD"
+        return 1
+    fi
+}
+
+# ── Core restart logic ─────────────────────────────────────────────────────
+restart_webui() {
+    local attempt="$1"
+
+    if ! validate_restart_cmd; then
+        log_error "Invalid start command, aborting restart"
+        return 1
+    fi
+
+    log_info "Restart attempt $attempt/$MAX_RETRIES"
+
+    # Kill existing processes
+    kill_webui_gracefully
+
+    # Wait for port release
+    wait_for_port_release || true
+
+    # Start new process in background using array (no eval)
+    log_info "Starting: $START_CMD"
+    # shellcheck disable=SC2086
+    nohup $START_CMD >> "$LOG_DIR/webui-stdout.log" 2>&1 &
+    local new_pid=$!
+    log_info "Started with PID $new_pid"
+
+    # Wait for health check to pass
+    local waited=0
+    while [ $waited -lt 30 ]; do
+        if is_webui_running; then
+            log_info "Health check passed after ${waited}s"
             return 0
         fi
         sleep 1
         waited=$((waited + 1))
     done
-    log "⚠️  Port $PORT still occupied after ${max_wait}s"
+
+    log_error "Health check failed after 30s (PID $new_pid)"
     return 1
 }
 
-save_crash_log() {
-    local reason="$1"
-    local phase="$2"
-    local timestamp_str
-    timestamp_str=$(date '+%Y-%m-%dT%H-%M-%S')
-    local crash_log="$LOG_DIR/crash-${timestamp_str}.log"
-
-    {
-        echo "=== Crash Report ==="
-        echo "Time: $(timestamp)"
-        echo "Reason: $reason"
-        echo "Phase: $phase"
-        echo ""
-        echo "--- Process Status ---"
-        ps aux | grep -E "hermes-web-ui|node.*${PORT}" | grep -v grep || echo "(no process found)"
-        echo ""
-        echo "--- System Resources ---"
-        free -h 2>/dev/null || echo "(free not available)"
-        df -h / 2>/dev/null || echo "(df not available)"
-        echo ""
-        echo "--- Uptime ---"
-        uptime
-        echo ""
-        echo "--- Recent Logs (last 80 lines) ---"
-        journalctl -u hermes-web-ui --no-pager -n 80 2>/dev/null || echo "(no systemd logs)"
-        echo ""
-        echo "--- Port Status ---"
-        lsof -i :"$PORT" 2>/dev/null || ss -tlnp | grep ":$PORT" || echo "(port not in use)"
-        echo ""
-        echo "--- Node.js Version ---"
-        node --version 2>/dev/null || echo "(node not found)"
-    } > "$crash_log" 2>&1
-
-    log "Crash log saved: $crash_log"
-    echo "$crash_log"
-}
-
-# --- Phase 1: Fast Restart ---
-restart_webui() {
-    local attempt=$1
-    log "Phase 1: Restart attempt $attempt/$MAX_RETRIES"
-
-    if $DRY_RUN; then
-        log "  [DRY RUN] Would restart web-ui"
-        return 1
-    fi
-
-    # Wait for port to be free
-    wait_for_port_free || true
-
-    if [[ -n "$RESTART_CMD" ]]; then
-        log "Running custom restart command: $RESTART_CMD"
-        eval "$RESTART_CMD" 2>&1 || true
-    else
-        # Try npm global first (production)
-        if command -v hermes-web-ui >/dev/null 2>&1; then
-            nohup hermes-web-ui --port "$PORT" > /dev/null 2>&1 &
-        # Try local node
-        elif [[ -f "dist/server/index.js" ]]; then
-            nohup node dist/server/index.js > /dev/null 2>&1 &
-        elif [[ -f "$HOME/.npm-global/lib/node_modules/hermes-web-ui/dist/server/index.js" ]]; then
-            nohup node "$HOME/.npm-global/lib/node_modules/hermes-web-ui/dist/server/index.js" > /dev/null 2>&1 &
-        else
-            log "ERROR: No restart method available"
-            return 1
-        fi
-    fi
-
-    # Wait for startup
-    local wait_count=0
-    while [[ $wait_count -lt 15 ]]; do
-        sleep 2
-        wait_count=$((wait_count + 1))
-        if check_health; then
-            log "✅ Phase 1 restart successful (healthy after $((wait_count * 2))s)"
+# ── Phase 1: Quick restart ────────────────────────────────────────────────
+phase1_quick_restart() {
+    log_info "=== Phase 1: Quick restart ==="
+    local attempt=1
+    while [ $attempt -le "$MAX_RETRIES" ]; do
+        if restart_webui "$attempt"; then
+            save_state "CONSECUTIVE_FAILURES" "0"
             return 0
         fi
+        attempt=$((attempt + 1))
+        sleep 5
     done
-
-    log "❌ Phase 1 restart failed — not healthy after 30s"
+    log_warn "Phase 1: All $MAX_RETRIES attempts failed"
     return 1
 }
 
-# --- Phase 2: Auto-Diagnose & Fix ---
-diagnose_and_fix() {
-    log "🔍 Phase 2: Running auto-diagnosis..."
+# ── Phase 2: Automatic diagnosis and repair ───────────────────────────────
+phase2_auto_repair() {
+    log_info "=== Phase 2: Automatic diagnosis and repair ==="
 
-    local crash_log
-    crash_log=$(save_crash_log "Phase 2 diagnosis start" "phase2")
-    local log_content
-    log_content=$(cat "$crash_log")
+    local error_log="$LOG_DIR/webui-stdout.log"
+    local last_error=""
+    if [ -f "$error_log" ]; then
+        last_error=$(tail -100 "$error_log" 2>/dev/null || true)
+    fi
 
-    local fixed=false
+    local error_type
+    error_type=$(classify_error "$last_error")
+    log_info "Error classification: $error_type"
 
-    # --- Check 1: EADDRINUSE (Port occupied by stale process) ---
-    if echo "$log_content" | grep -qi "EADDRINUSE\|address already in use"; then
-        log "  🔧 Diagnosis: Port $PORT occupied by stale process"
-        local stale_pid
-        stale_pid=$(lsof -ti :"$PORT" 2>/dev/null || true)
-        if [[ -n "$stale_pid" ]]; then
-            log "  Killing stale process: $stale_pid"
-            kill "$stale_pid" 2>/dev/null || true
-            sleep 2
-            kill -9 "$stale_pid" 2>/dev/null || true
-            sleep 1
-            if restart_webui "diagnose"; then
-                fixed=true
-                log "  ✅ Fixed: Killed stale process + restarted"
+    local repair_success=false
+
+    case "$error_type" in
+        OOM)
+            log_info "Attempting OOM repair"
+            # Free system memory (Linux only, skip gracefully on macOS)
+            if is_linux && [ -f /proc/sys/vm/drop_caches ]; then
+                if sudo -n true 2>/dev/null; then
+                    sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null 2>&1 || true
+                else
+                    log_warn "Cannot free system cache: sudo requires password"
+                fi
             fi
-        fi
-    fi
-
-    # --- Check 2: OOM (Out of Memory) ---
-    if ! $fixed && echo "$log_content" | grep -qi "out of memory\|OOM\|heap\|JavaScript heap"; then
-        log "  🔧 Diagnosis: Out of memory"
-        sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-        local heavy
-        heavy=$(ps aux --sort=-%mem | awk 'NR>1 && $6>500000 && !/hermes/ {print $2}' | head -3)
-        if [[ -n "$heavy" ]]; then
-            log "  Killing heavy processes: $heavy"
-            echo "$heavy" | xargs kill 2>/dev/null || true
-            sleep 2
-        fi
-        if restart_webui "diagnose"; then
-            fixed=true
-            log "  ✅ Fixed: Cleaned memory + restarted"
-        fi
-    fi
-
-    # --- Check 3: MODULE_NOT_FOUND ---
-    if ! $fixed && echo "$log_content" | grep -qi "MODULE_NOT_FOUND\|Cannot find module"; then
-        log "  🔧 Diagnosis: Missing module"
-        local webui_dir
-        webui_dir=$(find /home -name "hermes-web-ui" -type d -path "*/dist/.." 2>/dev/null | head -1)
-        if [[ -n "$webui_dir" ]] && [[ -d "$webui_dir" ]]; then
-            log "  Reinstalling dependencies in $webui_dir"
-            (cd "$webui_dir" && npm install --production 2>&1 | tail -3) || true
-            sleep 2
-            if restart_webui "diagnose"; then
-                fixed=true
-                log "  ✅ Fixed: Reinstalled deps + restarted"
+            # Try restart with reduced memory
+            export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=512}"
+            if restart_webui "Phase2-oom"; then
+                repair_success=true
             fi
-        fi
-    fi
+            ;;
 
-    # --- Check 4: EACCES (Permission denied) ---
-    if ! $fixed && echo "$log_content" | grep -qi "EACCES\|permission denied"; then
-        log "  🔧 Diagnosis: Permission issue"
-        chown -R "$(whoami):$(whoami)" "$HOME/.hermes-web-ui/" 2>/dev/null || true
-        chmod -R 755 "$HOME/.hermes-web-ui/" 2>/dev/null || true
-        if restart_webui "diagnose"; then
-            fixed=true
-            log "  ✅ Fixed: Fixed permissions + restarted"
-        fi
-    fi
-
-    # --- Check 5: ENOSPC (Disk full) ---
-    if ! $fixed && echo "$log_content" | grep -qi "ENOSPC\|no space left"; then
-        log "  🔧 Diagnosis: Disk full"
-        find "$LOG_DIR" -name "crash-*.log" -mtime +7 -delete 2>/dev/null || true
-        find "$LOG_DIR" -name "*.log" -size +10M -delete 2>/dev/null || true
-        find "$HOME/.hermes-web-ui/upload/" -mtime +30 -type f -delete 2>/dev/null || true
-        journalctl --vacuum-size=100M 2>/dev/null || true
-        if restart_webui "diagnose"; then
-            fixed=true
-            log "  ✅ Fixed: Cleaned disk + restarted"
-        fi
-    fi
-
-    # --- Check 6: Upstream Hermes Agent Down ---
-    if ! $fixed && echo "$log_content" | grep -qi "ECONNREFUSED\|upstream\|fetch failed"; then
-        log "  🔧 Diagnosis: Upstream connection issue"
-        for port in 8642 8643 18789; do
-            if curl -s --connect-timeout 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-                log "  Upstream on port $port is alive"
-            else
-                log "  Upstream on port $port is DOWN"
+        PORT_CONFLICT)
+            log_info "Attempting port conflict repair"
+            local port
+            port=$(echo "$HEALTH_URL" | grep -oE ':[0-9]+' | tr -d ':' || echo "8648")
+            # Kill any process on the port (cross-platform)
+            if command -v lsof >/dev/null 2>&1; then
+                lsof -ti :"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+            elif command -v fuser >/dev/null 2>&1; then
+                fuser -k "$port/tcp" 2>/dev/null || true
             fi
-        done
-        if restart_webui "diagnose"; then
-            fixed=true
-            log "  ✅ Fixed: Restarted (upstream may have recovered)"
-        fi
-    fi
-
-    # --- Check 7: SyntaxError / TypeError (Code error) ---
-    if ! $fixed && echo "$log_content" | grep -qi "SyntaxError\|TypeError\|ReferenceError"; then
-        log "  🔧 Diagnosis: Code error detected"
-        log "  Attempting rebuild..."
-        local webui_dir
-        webui_dir=$(find /home -name "hermes-web-ui" -type d -path "*/dist/.." 2>/dev/null | head -1)
-        if [[ -n "$webui_dir" ]] && [[ -d "$webui_dir" ]]; then
-            (cd "$webui_dir" && npm run build 2>&1 | tail -5) || true
             sleep 2
-            if restart_webui "diagnose"; then
-                fixed=true
-                log "  ✅ Fixed: Rebuilt + restarted"
+            if restart_webui "Phase2-port"; then
+                repair_success=true
             fi
-        fi
-    fi
+            ;;
 
-    # --- Check 8: Corrupted node_modules ---
-    if ! $fixed && echo "$log_content" | grep -qi "Cannot find module.*node_modules"; then
-        log "  🔧 Diagnosis: Corrupted node_modules"
-        local webui_dir
-        webui_dir=$(find /home -name "hermes-web-ui" -type d -path "*/dist/.." 2>/dev/null | head -1)
-        if [[ -n "$webui_dir" ]] && [[ -d "$webui_dir" ]]; then
-            (cd "$webui_dir" && rm -rf node_modules && npm install 2>&1 | tail -3 && npm run build 2>&1 | tail -3) || true
-            sleep 2
-            if restart_webui "diagnose"; then
-                fixed=true
-                log "  ✅ Fixed: Clean reinstall + rebuilt + restarted"
+        NODE_MISSING)
+            log_info "Attempting node recovery"
+            # Check common node locations (cross-platform)
+            local node_candidates=(
+                "$HOME/.nvm/versions/node/*/bin/node"
+                "/usr/local/bin/node"
+                "/opt/homebrew/bin/node"
+                "$HOME/.local/share/fnm/aliases/default/bin/node"
+            )
+            for pattern in "${node_candidates[@]}"; do
+                # shellcheck disable=SC2086
+                for node_path in $pattern; do
+                    if [ -x "$node_path" ]; then
+                        local node_dir
+                        node_dir="$(dirname "$node_path")"
+                        export PATH="$node_dir:$PATH"
+                        log_info "Found node at $node_path, added to PATH"
+                        if restart_webui "Phase2-node"; then
+                            repair_success=true
+                            break 2
+                        fi
+                    fi
+                done
+            done
+            ;;
+
+        MISSING_MODULE)
+            log_info "Attempting module reinstall"
+            if [ -f "$HOME/hermes-web-ui-dev/package.json" ]; then
+                cd "$HOME/hermes-web-ui-dev"
+                if command -v pnpm >/dev/null 2>&1; then
+                    pnpm install --frozen-lockfile 2>&1 | tail -5 >> "$WATCHDOG_LOG"
+                elif command -v npm >/dev/null 2>&1; then
+                    npm install 2>&1 | tail -5 >> "$WATCHDOG_LOG"
+                fi
+                cd - >/dev/null
             fi
-        fi
-    fi
+            if restart_webui "Phase2-module"; then
+                repair_success=true
+            fi
+            ;;
 
-    if $fixed; then
-        log "✅ Phase 2 diagnosis complete — issue resolved"
+        PERMISSION_ERROR)
+            log_info "Attempting permission repair"
+            if [ -d "$HOME/.hermes-web-ui" ]; then
+                chmod -R u+rw "$HOME/.hermes-web-ui" 2>/dev/null || true
+            fi
+            mkdir -p "$HOME/.hermes-web-ui/state" "$HOME/.hermes-web-ui/upload" 2>/dev/null || true
+            if restart_webui "Phase2-perm"; then
+                repair_success=true
+            fi
+            ;;
+
+        DB_ERROR)
+            log_info "Attempting database repair"
+            local db_files=("$HOME/.hermes-web-ui/state/"*.db)
+            for db_file in "${db_files[@]}"; do
+                if [ -f "$db_file" ] && command -v sqlite3 >/dev/null 2>&1; then
+                    sqlite3 "$db_file" "PRAGMA integrity_check;" 2>/dev/null | grep -q "ok" || {
+                        log_warn "Database corruption detected in $db_file"
+                        # Backup corrupted DB
+                        cp "$db_file" "${db_file}.corrupted.$(date +%s)" 2>/dev/null || true
+                    }
+                fi
+            done
+            if restart_webui "Phase2-db"; then
+                repair_success=true
+            fi
+            ;;
+
+        SSL_ERROR)
+            log_info "SSL error detected — disabling SSL verification for npm"
+            export NODE_TLS_REJECT_UNAUTHORIZED=0
+            export npm_config_strict_ssl=false
+            if restart_webui "Phase2-ssl"; then
+                repair_success=true
+            fi
+            ;;
+
+        *)
+            log_info "Attempting generic restart for error type: $error_type"
+            # Clear any stuck state
+            rm -f /tmp/.hermes-web-ui-* 2>/dev/null || true
+            if restart_webui "Phase2-generic"; then
+                repair_success=true
+            fi
+            ;;
+    esac
+
+    if [ "$repair_success" = true ]; then
+        log_info "Phase 2 repair successful ($error_type)"
         return 0
-    else
-        log "❌ Phase 2 diagnosis complete — no match or fix failed"
-        return 1
     fi
+
+    log_warn "Phase 2 repair failed ($error_type)"
+    return 1
 }
 
-# --- Phase 3: Agent-Triggered Repair ---
-# Check if hermes-agent CLI is available and its API server is running
+# ── Phase 3: Agent-assisted repair ────────────────────────────────────────
 detect_hermes_agent() {
-    # Check if hermes CLI is installed
-    if ! command -v hermes >/dev/null 2>&1; then
-        log "  hermes CLI not found in PATH"
-        return 1
-    fi
-
-    # Check if hermes agent is running (try common ports)
-    for port in 8015 18789 8642 8643; do
-        if curl -s --connect-timeout 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-            log "  Hermes agent detected on port $port"
-            return 0
-        fi
-    done
-
-    # Check if hermes process is running even if health endpoint is missing
-    if pgrep -f "hermes.*(agent|gateway|run_agent)" >/dev/null 2>&1; then
-        log "  Hermes agent process detected (no health endpoint)"
+    # Check local hermes command
+    if command -v hermes >/dev/null 2>&1; then
         return 0
     fi
-
-    log "  No hermes agent detected"
+    # Check remote gateway via HTTP
+    if curl -sf --connect-timeout 3 "http://localhost:18789/api/health" > /dev/null 2>&1; then
+        return 0
+    fi
     return 1
 }
 
-# Try to start hermes agent if it's down
 try_start_hermes_agent() {
-    log "  Attempting to start hermes agent..."
-
-    # Try systemd first
-    if systemctl --user start hermes-gateway 2>/dev/null; then
-        log "  Started via systemctl"
-        sleep 5
-        return 0
+    # Try systemd (Linux)
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl start hermes-gateway 2>/dev/null; then
+            sleep 5
+            if curl -sf --connect-timeout 5 "http://localhost:18789/api/health" > /dev/null 2>&1; then
+                return 0
+            fi
+        fi
     fi
-
-    # Try nohup
-    if command -v hermes >/dev/null 2>&1; then
-        nohup hermes gateway run > /dev/null 2>&1 &
+    # Try launchd (macOS)
+    if command -v launchctl >/dev/null 2>&1; then
+        if launchctl start com.hermes.gateway 2>/dev/null; then
+            sleep 5
+            if curl -sf --connect-timeout 5 "http://localhost:18789/api/health" > /dev/null 2>&1; then
+                return 0
+            fi
+        fi
+    fi
+    # Try direct startup
+    if [ -f "$HOME/hermes-gateway/start.sh" ]; then
+        nohup bash "$HOME/hermes-gateway/start.sh" >> "$LOG_DIR/hermes-agent-restart.log" 2>&1 &
         sleep 5
-        if detect_hermes_agent; then
-            log "  Started via nohup"
+        if curl -sf --connect-timeout 5 "http://localhost:18789/api/health" > /dev/null 2>&1; then
             return 0
         fi
     fi
-
-    log "  ❌ Failed to start hermes agent"
     return 1
 }
 
 trigger_agent_repair() {
-    log "🤖 Phase 3: Triggering agent auto-repair..."
+    log_info "=== Phase 3: Agent-assisted repair ==="
 
-    local crash_log="$1"
-    local error_class="$2"
-
-    # Build the diagnostic context for the agent
-    local crash_log_content=""
-    if [[ -f "$crash_log" ]]; then
-        crash_log_content=$(tail -100 "$crash_log" 2>/dev/null || echo "")
-    fi
-
-    # Run standalone diagnosis for structured output
-    local diagnosis_output=""
-    local diagnose_script="$HOME/.hermes-web-ui/crash-diagnose.sh"
-    if [[ -x "$diagnose_script" ]]; then
-        diagnosis_output=$("$diagnose_script" --json 2>/dev/null || echo "{}")
-    fi
-
-    # Check if hermes agent is available
+    # Detect or start hermes-agent
     if ! detect_hermes_agent; then
-        log "  Hermes agent not available — attempting to start..."
-        if try_start_hermes_agent; then
-            log "  Agent started successfully"
-        else
-            log "  ❌ Cannot start agent — falling through to Phase 4"
+        log_warn "Hermes agent not available, attempting to start..."
+        if ! try_start_hermes_agent; then
+            log_error "Cannot start hermes agent"
             return 1
         fi
     fi
 
-    # Write the repair prompt
-    local repair_prompt
-    repair_prompt=$(cat <<PROMPT
-## Web-UI Crash Auto-Repair Task
+    # Collect crash context
+    local error_log="$LOG_DIR/webui-stdout.log"
+    local diagnose_output="$LOG_DIR/diagnose-output.txt"
 
-The hermes-web-ui service has crashed and automated recovery (Phase 1 & 2) failed.
-You are being called to diagnose and fix the issue automatically.
+    # Run diagnose script if available
+    if [ -f "$SCRIPT_DIR/crash-diagnose.sh" ]; then
+        bash "$SCRIPT_DIR/crash-diagnose.sh" > "$diagnose_output" 2>&1 || true
+    fi
 
-### Error Classification: ${error_class}
+    # Build repair prompt
+    local last_error=""
+    if [ -f "$error_log" ]; then
+        last_error=$(tail -200 "$error_log" 2>/dev/null || true)
+    fi
 
-### Diagnosis Output:
-${diagnosis_output}
+    local error_type
+    error_type=$(classify_error "$last_error")
 
-### Crash Log (last 100 lines):
-\`\`\`
-${crash_log_content}
-\`\`\`
+    local prompt="CRASH RECOVERY REQUEST
 
-### Instructions:
-1. Read the crash recovery protocol: docs/CRASH-RECOVERY-PROTOCOL.md
-2. Read the latest crash log: \$(ls -t ~/.hermes-web-ui/logs/crash-*.log | head -1 | xargs cat)
-3. Check system resources: free -h && df -h / && uptime
-4. Based on error class "${error_class}", apply the appropriate fix from the protocol
-5. After fixing, verify the service is healthy: curl -s http://127.0.0.1:${PORT}/health
-6. If fixed, clean up: rm -f ~/.hermes-web-ui/logs/CRASH_SIGNAL
-7. Report what you did and whether it succeeded
+Web-ui has crashed and automated restarts have failed.
 
-### Important:
-- Follow the CRASH-RECOVERY-PROTOCOL.md strictly
-- Do NOT modify source code unless absolutely necessary
-- Prefer reinstall/rebuild over code changes
-- After any restart, always verify health endpoint responds 200
-PROMPT
-)
+Error type: $error_type
+Phase 1: Quick restart failed ($MAX_RETRIES attempts)
+Phase 2: Automated repair failed
 
-    # Call hermes agent with the repair prompt
-    log "  Sending repair request to agent (timeout: ${AGENT_TIMEOUT}s)..."
+Please diagnose and fix. Follow CRASH-RECOVERY-PROTOCOL.md.
 
-    local agent_output=""
-    local agent_exit=1
+Error log (last 200 lines):
+$last_error
 
-    # Use hermes chat -q (non-interactive mode) with timeout
-    agent_output=$(timeout "$AGENT_TIMEOUT" hermes chat --yolo -q "$repair_prompt" 2>&1) || agent_exit=$?
+--- END CRASH RECOVERY ---"
 
-    if [[ $agent_exit -eq 0 ]]; then
-        log "✅ Phase 3: Agent repair completed successfully"
-        log "  Agent output (last 5 lines):"
-        echo "$agent_output" | tail -5 | while IFS= read -r line; do
-            log "    $line"
-        done
+    log_info "Calling hermes agent for repair..."
 
-        # Verify if web-ui is actually back
-        sleep 5
-        if check_health; then
-            log "✅ Phase 3: Web-ui confirmed healthy after agent repair"
-            return 0
+    # Try hermes CLI first
+    if command -v hermes >/dev/null 2>&1; then
+        if timeout 120 hermes chat --yolo -q "$prompt" > "$LOG_DIR/agent-repair-output.log" 2>&1; then
+            log_info "Agent repair command sent via CLI"
         else
-            log "⚠️  Phase 3: Agent completed but web-ui still not healthy"
-            return 1
+            log_warn "Agent CLI call failed or timed out"
         fi
-    elif [[ $agent_exit -eq 124 ]]; then
-        log "❌ Phase 3: Agent repair timed out after ${AGENT_TIMEOUT}s"
+    fi
+
+    # Verify recovery
+    sleep 10
+    if is_webui_running; then
+        log_info "Phase 3 successful — web-ui recovered after agent repair"
+        return 0
+    fi
+
+    log_warn "Phase 3: Web-ui still down after agent repair"
+    return 1
+}
+
+# ── Phase 4: Final diagnostic report ─────────────────────────────────────
+phase4_final_report() {
+    log_error "=== Phase 4: All recovery attempts exhausted ==="
+
+    local report="$STATE_DIR/CRASH_REPORT-$(date +%Y%m%d_%H%M%S).md"
+    local error_log="$LOG_DIR/webui-stdout.log"
+
+    {
+        echo "# Crash Report — $(date '+%Y-%m-%d %H:%M:%S')"
+        echo ""
+        echo "## Status: UNRECOVERED — manual intervention required"
+        echo ""
+        echo "## Recovery attempts"
+        echo "- Phase 1: Quick restart — FAILED"
+        echo "- Phase 2: Auto repair — FAILED"
+        echo "- Phase 3: Agent repair — FAILED"
+        echo ""
+        echo "## Last error (tail -100)"
+        echo '```'
+        tail -100 "$error_log" 2>/dev/null || echo "(no error log found)"
+        echo '```'
+        echo ""
+        echo "## Watchdog log (last 50 lines)"
+        echo '```'
+        tail -50 "$WATCHDOG_LOG" 2>/dev/null || echo "(no watchdog log)"
+        echo '```'
+    } > "$report"
+
+    log_error "Crash report saved to: $report"
+    log_error "Stopping watchdog — manual intervention required"
+}
+
+# ── Global circuit breaker ────────────────────────────────────────────────
+check_circuit_breaker() {
+    local today
+    today="$(date +%Y-%m-%d)"
+    local daily_date
+    daily_date="$(get_state "DAILY_FAILURE_DATE" "")"
+
+    # Reset daily counter on new day
+    if [ "$daily_date" != "$today" ]; then
+        save_state "DAILY_FAILURES" "0"
+        save_state "DAILY_FAILURE_DATE" "$today"
+    fi
+
+    local daily_count
+    daily_count="$(get_state "DAILY_FAILURES" "0")"
+
+    if [ "$daily_count" -ge "$MAX_DAILY_FAILURES" ]; then
+        log_error "CIRCUIT BREAKER: $daily_count failures today (max $MAX_DAILY_FAILURES). Stopping watchdog."
         return 1
-    else
-        log "❌ Phase 3: Agent repair failed (exit code: $agent_exit)"
-        log "  Agent output (last 10 lines):"
-        echo "$agent_output" | tail -10 | while IFS= read -r line; do
-            log "    $line"
-        done
-        return 1
     fi
+    return 0
 }
 
-# --- Phase 4: Manual Intervention Report ---
-write_diagnostic_report() {
-    local crash_log="$1"
-    local error_class="$2"
-    local timestamp_str
-    timestamp_str=$(date '+%Y-%m-%dT%H-%M-%S')
+# ── Main loop ─────────────────────────────────────────────────────────────
+main() {
+    setup_logging
+    detect_start_cmd
+    init_state
 
-    cat > "$CRASH_SIGNAL" <<EOF
-# CRASH RECOVERY SIGNAL
-# Generated by watchdog — ALL automatic recovery phases failed
-# This requires manual intervention
+    log_info "Watchdog v2.0 started"
+    log_info "Health check: $HEALTH_URL"
+    log_info "Check interval: ${CHECK_INTERVAL}s"
+    log_info "Max retries per cycle: $MAX_RETRIES"
+    log_info "Max daily failures: $MAX_DAILY_FAILURES"
+    log_info "Platform: $(uname -s) $(uname -m)"
 
-CRASH_TIME=$(timestamp)
-ERROR_CLASS=$error_class
-PHASE1_ATTEMPTS=$MAX_RETRIES
-PHASE2_DIAGNOSES=$PHASE2_COUNT
-PHASE3_AGENT_ATTEMPTS=$PHASE3_COUNT
-STATUS=MANUAL_INTERVENTION_NEEDED
+    # Write PID file
+    echo $$ > "$LOCKFILE"
 
-## Recovery Summary:
-# Phase 1 (Fast Restart): Failed $MAX_RETRIES attempts
-# Phase 2 (Auto-Diagnose): Ran $PHASE2_COUNT diagnoses, no fix worked
-# Phase 3 (Agent Repair): Triggered $PHASE3_COUNT times, agent could not fix
+    while true; do
+        # Check maintenance mode (skip monitoring during updates)
+        if [ "$(get_state "MAINTENANCE_MODE" "0")" = "1" ]; then
+            log_info "Maintenance mode active, skipping health check"
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
 
-## Next steps for manual intervention:
-# 1. Read latest crash log: ls -t ~/.hermes-web-ui/logs/crash-*.log | head -1 | xargs cat
-# 2. Run diagnosis: bash ~/.hermes-web-ui/crash-diagnose.sh
-# 3. Classify error: see ERROR_CLASS above
-# 4. Follow docs/CRASH-RECOVERY-PROTOCOL.md for fix recipe
-# 5. After fix: rm ~/.hermes-web-ui/logs/CRASH_SIGNAL
-# 6. Restart watchdog: systemctl --user restart hermes-web-ui-watchdog
-EOF
+        if is_webui_running; then
+            # All good — reset consecutive failures
+            save_state "CONSECUTIVE_FAILURES" "0"
+        else
+            log_warn "Web-UI health check failed!"
 
-    log "⚠️  CRASH_SIGNAL written — manual intervention needed"
-    log "   Error class: $error_class"
-    log "   Log: $crash_log"
+            # Check circuit breaker
+            if ! check_circuit_breaker; then
+                phase4_final_report
+                exit 1
+            fi
+
+            # Increment counters
+            local failures
+            failures="$(get_state "CONSECUTIVE_FAILURES" "0")"
+            failures=$((failures + 1))
+            save_state "CONSECUTIVE_FAILURES" "$failures"
+
+            local daily
+            daily="$(get_state "DAILY_FAILURES" "0")"
+            daily=$((daily + 1))
+            save_state "DAILY_FAILURES" "$daily"
+            save_state "DAILY_FAILURE_DATE" "$(date +%Y-%m-%d)"
+
+            log_info "Failure #$failures (daily: $daily/$MAX_DAILY_FAILURES)"
+
+            # Phase 1: Quick restart (up to MAX_RETRIES)
+            if [ "$failures" -le "$MAX_RETRIES" ]; then
+                phase1_quick_restart
+                sleep "$CHECK_INTERVAL"
+                continue
+            fi
+
+            # Phase 2: Automatic diagnosis and repair
+            if [ "$failures" -le $((MAX_RETRIES * 2)) ]; then
+                phase2_auto_repair
+                sleep "$CHECK_INTERVAL"
+                continue
+            fi
+
+            # Phase 3: Agent-assisted repair
+            if trigger_agent_repair; then
+                save_state "CONSECUTIVE_FAILURES" "0"
+                sleep "$CHECK_INTERVAL"
+                continue
+            fi
+
+            # Phase 4: Final report
+            phase4_final_report
+            exit 1
+        fi
+
+        sleep "$CHECK_INTERVAL"
+    done
 }
 
-clear_crash_signal() {
-    rm -f "$CRASH_SIGNAL" 2>/dev/null
-}
-
-# --- Main Loop ---
-log "Watchdog started (port=$PORT, interval=${CHECK_INTERVAL}s, max_retries=$MAX_RETRIES, agent_timeout=${AGENT_TIMEOUT}s)"
-log "Phase 3 auto-repair: $(command -v hermes >/dev/null 2>&1 && echo 'ENABLED' || echo 'DISABLED (hermes not found)')"
-
-while true; do
-    sleep "$CHECK_INTERVAL"
-
-    # Skip if maintenance mode (during updates)
-    if is_maintenance_mode; then
-        if [[ ! -f "$HOME/.hermes-web-ui/.watchdog-muted" ]]; then
-            log "⏸️  Maintenance mode active — skipping checks"
-            touch "$HOME/.hermes-web-ui/.watchdog-muted"
-        fi
-        continue
-    else
-        rm -f "$HOME/.hermes-web-ui/.watchdog-muted" 2>/dev/null
-    fi
-
-    # Everything healthy?
-    if check_process_alive && check_health; then
-        if [[ $CONSECUTIVE_FAILURES -gt 0 ]]; then
-            log "✅ Service stable after $CONSECUTIVE_FAILURES recovery attempts"
-        fi
-        CONSECUTIVE_FAILURES=0
-        TOTAL_FAILURES_TODAY=0
-        PHASE2_COUNT=0
-        PHASE3_COUNT=0
-        clear_crash_signal
-        save_state
-        continue
-    fi
-
-    # --- Service is down ---
-    log "⚠️  Service is down! (process=$(check_process_alive && echo alive || echo dead), health=$(check_health 2>/dev/null && echo ok || echo fail))"
-
-    # Save crash log
-    crash_log=$(save_crash_log "Auto-detected failure" "phase1") || true
-
-    CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
-    TOTAL_FAILURES_TODAY=$((TOTAL_FAILURES_TODAY + 1))
-    LAST_CRASH_TIME=$(date +%s)
-
-    # --- Check global circuit breaker ---
-    if [[ $TOTAL_FAILURES_TODAY -ge $DAILY_GLOBAL_LIMIT ]]; then
-        log "🛑 GLOBAL CIRCUIT BREAKER: $TOTAL_FAILURES_TODAY failures today — stopping watchdog"
-        log "   Manual intervention required"
-        write_diagnostic_report "${crash_log:-unknown}" "CIRCUIT_BREAKER" || true
-        save_state
-        while true; do
-            sleep 3600
-        done
-    fi
-
-    # --- Classify error from crash log ---
-    error_class="UNKNOWN"
-    if [[ -f "$crash_log" ]]; then
-        local log_content
-        log_content=$(cat "$crash_log")
-        if echo "$log_content" | grep -qi "EADDRINUSE"; then error_class="PORT_CONFLICT"
-        elif echo "$log_content" | grep -qi "out of memory\|OOM\|heap"; then error_class="OOM"
-        elif echo "$log_content" | grep -qi "MODULE_NOT_FOUND"; then error_class="MISSING_MODULE"
-        elif echo "$log_content" | grep -qi "EACCES\|permission"; then error_class="PERMISSION"
-        elif echo "$log_content" | grep -qi "ENOSPC\|no space"; then error_class="DISK_FULL"
-        elif echo "$log_content" | grep -qi "SyntaxError\|TypeError\|ReferenceError"; then error_class="CODE_ERROR"
-        elif echo "$log_content" | grep -qi "ECONNREFUSED\|fetch failed"; then error_class="UPSTREAM_DOWN"
-        fi
-    fi
-
-    # --- Phase 1: Fast restart ---
-    if [[ $CONSECUTIVE_FAILURES -le $MAX_RETRIES ]]; then
-        if restart_webui "$CONSECUTIVE_FAILURES"; then
-            CONSECUTIVE_FAILURES=0
-            clear_crash_signal
-            save_state
-            continue
-        fi
-    fi
-
-    # --- Phase 2: Auto-diagnose ---
-    if [[ $PHASE2_COUNT -lt $PHASE2_MAX_DIAGNOSES ]]; then
-        PHASE2_COUNT=$((PHASE2_COUNT + 1))
-        log "Running Phase 2 diagnosis ($PHASE2_COUNT/$PHASE2_MAX_DIAGNOSES)"
-
-        if diagnose_and_fix; then
-            CONSECUTIVE_FAILURES=0
-            PHASE2_COUNT=0
-            clear_crash_signal
-            save_state
-            continue
-        fi
-    fi
-
-    # --- Phase 3: Agent-triggered repair ---
-    if [[ $PHASE3_COUNT -lt $PHASE3_MAX_ATTEMPTS ]]; then
-        PHASE3_COUNT=$((PHASE3_COUNT + 1))
-        log "Running Phase 3 agent repair ($PHASE3_COUNT/$PHASE3_MAX_ATTEMPTS)"
-
-        if trigger_agent_repair "${crash_log:-unknown}" "$error_class"; then
-            CONSECUTIVE_FAILURES=0
-            PHASE2_COUNT=0
-            PHASE3_COUNT=0
-            clear_crash_signal
-            save_state
-            continue
-        fi
-    fi
-
-    # --- Phase 4: Manual intervention needed ---
-    log "🛑 All automatic recovery phases exhausted. Manual intervention needed."
-    write_diagnostic_report "${crash_log:-unknown}" "$error_class" || true
-    save_state
-
-    # Sleep before next full cycle
-    log "   Sleeping 10 minutes before next full recovery cycle..."
-    sleep 600
-
-    # Reset for next cycle (keep daily total)
-    CONSECUTIVE_FAILURES=0
-    # Don't reset PHASE2_COUNT or PHASE3_COUNT — bounded by max
-done
+# ── Maintenance mode commands ─────────────────────────────────────────────
+case "${1:-run}" in
+    run)
+        main
+        ;;
+    status)
+        echo "=== Watchdog Status ==="
+        echo "Consecutive failures: $(get_state CONSECUTIVE_FAILURES 0)"
+        echo "Daily failures: $(get_state DAILY_FAILURES 0)"
+        echo "Maintenance mode: $(get_state MAINTENANCE_MODE 0)"
+        echo "Web-UI running: $(is_webui_running && echo 'yes' || echo 'no')"
+        ;;
+    maintenance-on)
+        init_state
+        save_state "MAINTENANCE_MODE" "1"
+        echo "Maintenance mode ON — watchdog will skip health checks"
+        ;;
+    maintenance-off)
+        init_state
+        save_state "MAINTENANCE_MODE" "0"
+        echo "Maintenance mode OFF — watchdog will resume health checks"
+        ;;
+    *)
+        echo "Usage: $0 {run|status|maintenance-on|maintenance-off}"
+        exit 1
+        ;;
+esac
