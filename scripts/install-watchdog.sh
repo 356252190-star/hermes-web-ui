@@ -1,67 +1,103 @@
 #!/usr/bin/env bash
-#
-# Install hermes-web-ui watchdog as a systemd service
-#
-# Usage: bash scripts/install-watchdog.sh [--port 8648] [--user root]
-#
+# ============================================================================
+# Install hermes-web-ui watchdog as a systemd service (Linux) or launchd agent (macOS)
+# Usage: sudo bash install-watchdog.sh
+# ============================================================================
 
 set -euo pipefail
 
-PORT="${PORT:-8648}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-WATCHDOG_SCRIPT="$PROJECT_DIR/scripts/watchdog.sh"
-DIAGNOSE_SCRIPT="$PROJECT_DIR/scripts/crash-diagnose.sh"
-SERVICE_FILE="$PROJECT_DIR/scripts/hermes-web-ui-watchdog.service"
-INSTALL_DIR="$HOME/.hermes-web-ui"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLATFORM="$(uname -s)"
 
-echo "🔧 Installing Hermes Web UI Watchdog..."
+echo "=========================================="
+echo "  Installing hermes-web-ui Watchdog"
+echo "  Platform: $PLATFORM"
+echo "=========================================="
 echo ""
 
-# 1. Create install directory
-mkdir -p "$INSTALL_DIR/logs"
+# Make scripts executable
+chmod +x "$SCRIPT_DIR/watchdog.sh"
+chmod +x "$SCRIPT_DIR/crash-diagnose.sh"
+chmod +x "$SCRIPT_DIR/error-classify.sh"
 
-# 2. Copy scripts
-cp "$WATCHDOG_SCRIPT" "$INSTALL_DIR/watchdog.sh"
-chmod +x "$INSTALL_DIR/watchdog.sh"
+# Verify required files exist
+for f in watchdog.sh crash-diagnose.sh error-classify.sh; do
+    if [ ! -f "$SCRIPT_DIR/$f" ]; then
+        echo "ERROR: $f not found in $SCRIPT_DIR"
+        exit 1
+    fi
+done
 
-if [[ -f "$DIAGNOSE_SCRIPT" ]]; then
-    cp "$DIAGNOSE_SCRIPT" "$INSTALL_DIR/crash-diagnose.sh"
-    chmod +x "$INSTALL_DIR/crash-diagnose.sh"
-fi
+case "$PLATFORM" in
+    Linux)
+        if ! command -v systemctl >/dev/null 2>&1; then
+            echo "ERROR: systemctl not found. Install systemd or run watchdog manually:"
+            echo "  bash $SCRIPT_DIR/watchdog.sh"
+            exit 1
+        fi
 
-# 3. Create systemd service
-SERVICE_PATH="$HOME/.config/systemd/user/hermes-web-ui-watchdog.service"
-mkdir -p "$(dirname "$SERVICE_PATH")"
-cp "$SERVICE_FILE" "$SERVICE_PATH"
+        # Install systemd service
+        SERVICE_FILE="/etc/systemd/system/hermes-web-ui-watchdog.service"
+        cp "$SCRIPT_DIR/hermes-web-ui-watchdog.service" "$SERVICE_FILE"
 
-# 4. Update port in service
-sed -i "s|Environment=PORT=8648|Environment=PORT=$PORT|" "$SERVICE_PATH"
+        # Reload and enable
+        systemctl daemon-reload
+        systemctl enable hermes-web-ui-watchdog
+        systemctl start hermes-web-ui-watchdog
 
-# 5. Reload and enable
-systemctl --user daemon-reload
-systemctl --user enable hermes-web-ui-watchdog
-systemctl --user start hermes-web-ui-watchdog
+        echo "Installed and started systemd service"
+        echo "  Status:  systemctl status hermes-web-ui-watchdog"
+        echo "  Logs:    journalctl -u hermes-web-ui-watchdog -f"
+        echo "  Stop:    systemctl stop hermes-web-ui-watchdog"
+        ;;
+
+    Darwin)
+        PLIST_PATH="$HOME/Library/LaunchAgents/com.hermes.web-ui-watchdog.plist"
+        cat > "$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.web-ui-watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$SCRIPT_DIR/watchdog.sh</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/.hermes-web-ui/logs/watchdog-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/.hermes-web-ui/logs/watchdog-launchd.log</string>
+</dict>
+</plist>
+PLIST
+
+        launchctl load "$PLIST_PATH"
+        echo "Installed and loaded launchd agent"
+        echo "  Status:  launchctl list | grep hermes"
+        echo "  Logs:    tail -f ~/.hermes-web-ui/logs/watchdog-launchd.log"
+        echo "  Stop:    launchctl unload $PLIST_PATH"
+        ;;
+
+    *)
+        echo "Unsupported platform: $PLATFORM"
+        echo "Run watchdog manually: bash $SCRIPT_DIR/watchdog.sh"
+        exit 1
+        ;;
+esac
 
 echo ""
-echo "✅ Watchdog installed and started!"
+echo "Done! Watchdog is now running."
 echo ""
-echo "=== Quick Reference ==="
-echo "  Status:    systemctl --user status hermes-web-ui-watchdog"
-echo "  Logs:      journalctl --user -u hermes-web-ui-watchdog -f"
-echo "  Stop:      systemctl --user stop hermes-web-ui-watchdog"
-echo "  Remove:    systemctl --user disable --now hermes-web-ui-watchdog"
-echo ""
-echo "=== Files ==="
-echo "  Watchdog:  $INSTALL_DIR/watchdog.sh"
-echo "  State:     $INSTALL_DIR/watchdog-state"
-echo "  Crash log: $INSTALL_DIR/logs/"
-echo "  Protocol:  docs/CRASH-RECOVERY-PROTOCOL.md"
-echo ""
-echo "=== Maintenance Mode ==="
-echo "  Enable:    touch $INSTALL_DIR/.maintenance"
-echo "  Disable:   rm $INSTALL_DIR/.maintenance"
-echo ""
-echo "=== Manual Diagnosis ==="
-echo "  Check:     cat $INSTALL_DIR/logs/CRASH_SIGNAL 2>/dev/null"
-echo "  Fix:       Follow docs/CRASH-RECOVERY-PROTOCOL.md"
+echo "Commands:"
+echo "  Status:           bash $SCRIPT_DIR/watchdog.sh status"
+echo "  Maintenance mode: bash $SCRIPT_DIR/watchdog.sh maintenance-on"
+echo "  Resume:           bash $SCRIPT_DIR/watchdog.sh maintenance-off"
+echo "  Diagnostics:      bash $SCRIPT_DIR/crash-diagnose.sh"
+echo "  Tests:            bash $SCRIPT_DIR/test-watchdog.sh"
