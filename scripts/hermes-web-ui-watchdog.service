@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes Web UI Watchdog
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash %h/.hermes-web-ui/watchdog.sh
+Restart=always
+RestartSec=10
+Environment=PORT=8648
+Environment=CHECK_INTERVAL=30
+Environment=MAX_RETRIES=3
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=%h/.hermes-web-ui
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
