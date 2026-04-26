@@ -529,6 +529,16 @@ export default {
 
   // Journal des modifications
   changelog: {
+    new_0_4_8_1: 'Safe Mermaid diagram rendering with async render and timeout fallback',
+    new_0_4_8_2: 'Fix nested markdown fence rendering truncation',
+    new_0_4_8_3: 'Fix compressed session lineage projection and search',
+    new_0_4_8_4: 'Optimize session list N+1 queries and fix search 500 on non-CJK input',
+    new_0_4_8_5: 'Fix forced scroll to bottom when switching back from other tabs',
+    new_0_4_8_6: 'Smooth session switch with loading transition overlay',
+    new_0_4_8_7: 'Fix login token validation using Hermes session endpoint',
+    new_0_4_8_8: 'Fix image attachments broken after page refresh (blob URL persistence)',
+    new_0_4_8_9: 'Click image attachments to preview in fullscreen overlay',
+    new_0_4_8_10: 'Move upload directory from temp to ~/.hermes-web-ui/upload',
     new_0_4_7_1: 'Affichage en streaming en temps reel des blocs de reflexion/raisonnement',
     new_0_4_7_2: 'Ignorer le script de preparation lors du build Docker',
     new_0_4_7_3: 'Ameliorations UX mobile du chat de groupe et polissage de l\'interface',

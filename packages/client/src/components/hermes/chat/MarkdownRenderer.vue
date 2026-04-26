@@ -84,6 +84,19 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   })
 }
 
+function getScrollParent(el: HTMLElement | null): HTMLElement | null {
+  if (!el) return null
+  let current: HTMLElement | null = el.parentElement
+  while (current) {
+    const { overflow, overflowY } = getComputedStyle(current)
+    if (overflow === 'auto' || overflow === 'scroll' || overflowY === 'auto' || overflowY === 'scroll') {
+      return current
+    }
+    current = current.parentElement
+  }
+  return null
+}
+
 function cleanupMermaidRenderArtifacts(id: string): void {
   document.getElementById(id)?.remove()
   document.getElementById(`d${id}`)?.remove()
@@ -158,6 +171,13 @@ async function renderMermaidDiagrams(): Promise<void> {
       element.removeAttribute('data-mermaid-pending')
       element.removeAttribute('data-mermaid-source')
       element.innerHTML = result.svg
+      // After mermaid renders, scroll the nearest scrollable ancestor to bottom
+      nextTick(() => {
+        const scrollParent = getScrollParent(markdownBody.value)
+        if (scrollParent) {
+          scrollParent.scrollTop = scrollParent.scrollHeight
+        }
+      })
     } catch {
       cleanupMermaidRenderArtifacts(`${componentId}-${generation}-${index}`)
       if (unmounted || generation !== renderGeneration || !root.contains(element)) return
@@ -329,6 +349,10 @@ function handleMarkdownClick(event: MouseEvent): void {
     color: $text-secondary;
     font-size: 13px;
     font-family: $font-code;
+    min-height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 }
 </style>

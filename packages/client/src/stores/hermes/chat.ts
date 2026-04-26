@@ -1,5 +1,6 @@
 import { startRun, streamRunEvents, type ChatMessage, type RunEvent } from '@/api/hermes/chat'
 import { deleteSession as deleteSessionApi, fetchSession, fetchSessions, fetchSessionUsageSingle, type HermesMessage, type SessionSummary } from '@/api/hermes/sessions'
+import { getApiKey } from '@/api/client'
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useAppStore } from './app'
@@ -797,7 +798,21 @@ export const useChatStore = defineStore('chat', () => {
       let inputText = content.trim()
       if (attachments && attachments.length > 0) {
         const uploaded = await uploadFiles(attachments)
-        const pathParts = uploaded.map(f => `[File: ${f.name}](${f.path})`)
+        // Replace blob URLs with persistent download URLs on the user message
+        const token = getApiKey()
+        const urlMap = new Map(uploaded.map(f => {
+          const base = `/api/hermes/download?path=${encodeURIComponent(f.path)}&name=${encodeURIComponent(f.name)}`
+          return [f.name, token ? `${base}&token=${encodeURIComponent(token)}` : base]
+        }))
+        const msgs = getSessionMsgs(sid)
+        const lastUser = msgs.findLast(m => m.id === userMsg.id)
+        if (lastUser?.attachments) {
+          lastUser.attachments = lastUser.attachments.map(a => {
+            const dl = urlMap.get(a.name)
+            return dl ? { ...a, url: dl } : a
+          })
+        }
+        const pathParts = uploaded.map(f => `[File: ${f.name}](${urlMap.get(f.name)})`)
         inputText = inputText ? inputText + '\n\n' + pathParts.join('\n') : pathParts.join('\n')
       }
 

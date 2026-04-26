@@ -11,6 +11,8 @@ const chatStore = useChatStore();
 const { t } = useI18n();
 const { isDark } = useTheme();
 const listRef = ref<HTMLElement>();
+const isTransitioning = ref(false);
+let transitionTimer: ReturnType<typeof setTimeout> | null = null;
 
 const displayMessages = computed(() =>
   chatStore.messages.filter((m) => m.role !== "tool"),
@@ -54,18 +56,59 @@ function scrollToMessage(messageId: string) {
   });
 }
 
-// Scroll to bottom once when messages are first loaded
+// Scroll to bottom once when messages are first loaded after session switch
+let pendingScrollToBottom = false
+let isInitialLoad = true
+
+function showTransition(): void {
+  if (isInitialLoad) return
+  if (transitionTimer) clearTimeout(transitionTimer)
+  isTransitioning.value = true
+}
+
+function hideTransition(): void {
+  if (transitionTimer) clearTimeout(transitionTimer)
+  transitionTimer = setTimeout(() => {
+    isTransitioning.value = false
+    transitionTimer = null
+  }, 100)
+}
+
 watch(
   () => chatStore.activeSessionId,
   (id) => {
     if (!id) return;
-    if (chatStore.focusMessageId) {
-      scrollToMessage(chatStore.focusMessageId);
+    if (isInitialLoad) {
+      isInitialLoad = false
+      if (!chatStore.focusMessageId) {
+        nextTick(() => scrollToBottom())
+      } else {
+        nextTick(() => scrollToMessage(chatStore.focusMessageId!))
+      }
       return;
     }
-    scrollToBottom();
+    if (chatStore.focusMessageId) {
+      nextTick(() => scrollToMessage(chatStore.focusMessageId!));
+      return;
+    }
+    pendingScrollToBottom = true
+    showTransition()
   },
   { immediate: true },
+);
+
+// Safety: ensure overlay is always removed once messages load
+watch(
+  () => chatStore.messages.length,
+  () => {
+    if (pendingScrollToBottom && chatStore.messages.length > 0) {
+      pendingScrollToBottom = false
+      setTimeout(() => {
+        scrollToBottom()
+        hideTransition()
+      }, 300)
+    }
+  },
 );
 
 watch(
@@ -92,7 +135,15 @@ watch(
       scrollToMessage(chatStore.focusMessageId);
       return;
     }
-    if (!chatStore.isStreaming) { scrollToBottom(); return; }
+    if (pendingScrollToBottom) {
+      pendingScrollToBottom = false
+      // Wait a moment for mermaid diagrams to render, then reveal and scroll
+      setTimeout(() => {
+        scrollToBottom()
+        hideTransition()
+      }, 300)
+      return
+    }
     if (!isNearBottom()) return;
     scrollToBottom();
   },
@@ -102,15 +153,14 @@ watch(currentToolCalls, () => {
     scrollToMessage(chatStore.focusMessageId);
     return;
   }
-  if (!chatStore.isStreaming) { scrollToBottom(); return; }
   if (!isNearBottom()) return;
   scrollToBottom();
 });
 </script>
 
 <template>
-  <div ref="listRef" class="message-list">
-    <div v-if="chatStore.messages.length === 0" class="empty-state">
+  <div ref="listRef" class="message-list" :class="{ 'is-transitioning': isTransitioning }">
+    <div v-if="chatStore.messages.length === 0 && !isTransitioning" class="empty-state">
       <img src="/logo.png" alt="Hermes" class="empty-logo" />
       <p>{{ t("chat.emptyState") }}</p>
     </div>
@@ -178,9 +228,15 @@ watch(currentToolCalls, () => {
   flex-direction: column;
   gap: 16px;
   background-color: $bg-card;
+  transition: opacity 0.15s ease;
 
   .dark & {
     background-color: #333333;
+  }
+
+  &.is-transitioning {
+    opacity: 0;
+    pointer-events: none;
   }
 }
 
