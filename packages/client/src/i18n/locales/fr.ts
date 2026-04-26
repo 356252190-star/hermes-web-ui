@@ -140,11 +140,10 @@ export default {
     copyBubble: 'Copier le message',
     copiedBubble: 'Message copié',
     copyFailed: 'Échec de la copie',
-    cropAvatar: 'Rogner l'avatar',
+    cropAvatar: 'Rogner l\'avatar',
     clickToSelectImage: 'Cliquez pour sélectionner une image',
     imageTooLarge: 'Image trop volumineuse (max 5 Mo)',
-    changeAvatar: 'Changer l'avatar',
- (feat: add custom avatar upload with image cropping)
+    changeAvatar: 'Changer l\'avatar',
   },
 
   // Jobs
