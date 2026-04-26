@@ -7,18 +7,50 @@ import { fetchContextLength } from '@/api/hermes/sessions'
 import { NButton, NTooltip } from 'naive-ui'
 import { computed, ref, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ImageCropDialog from '@/components/hermes/ImageCropDialog.vue'
 
 const chatStore = useChatStore()
 const { t } = useI18n()
 const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
 const fileInputRef = ref<HTMLInputElement>()
+const avatarInputRef = ref<HTMLInputElement>()
 const attachments = ref<Attachment[]>([])
 const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
+const showCropDialog = ref(false)
+
+// User avatar handlers
+function openAvatarPicker() { avatarInputRef.value?.click() }
+function onAvatarFileChange(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  // Check if animated (GIF/APNG) — skip crop, use directly
+  if (file.type === 'image/gif' || file.type === 'image/apng') {
+    if (file.size > 5 * 1024 * 1024) { return }
+    chatStore.uploadAvatar('user', file)
+    return
+  }
+  showCropDialog.value = true
+}
+function onAvatarCropped(dataUrl: string) {
+  // Convert cropped data URL to File and upload to server
+  fetch(dataUrl).then(r => r.blob()).then(blob => {
+    const file = new File([blob], 'avatar.png', { type: blob.type })
+    chatStore.uploadAvatar('user', file)
+  }).catch(() => {})
+  showCropDialog.value = false
+}
 
 const canSend = computed(() => inputText.value.trim() || attachments.value.length > 0)
+
+// Whether the send button should be enabled (respects busy input mode)
+const canSendNow = computed(() => {
+  if (!canSend.value) return false
+  if (!chatStore.isStreaming) return true
+  return chatStore.busyInputMode
+})
 
 // --- Context info ---
 
@@ -261,11 +293,22 @@ function isImage(type: string): boolean {
         class="file-input-hidden"
         @change="handleFileChange"
       />
+      <input
+        ref="avatarInputRef"
+        type="file"
+        accept="image/*"
+        class="file-input-hidden"
+        @change="onAvatarFileChange"
+      />
+      <div class="user-avatar" @click="openAvatarPicker" :title="t('chat.changeAvatar')">
+        <img v-if="chatStore.userAvatar" :src="chatStore.userAvatar" alt="avatar" />
+        <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </div>
       <textarea
         ref="textareaRef"
         v-model="inputText"
         class="input-textarea"
-        :placeholder="t('chat.inputPlaceholder')"
+        :placeholder="chatStore.isStreaming && chatStore.busyInputMode ? t('chat.interruptPlaceholder') : t('chat.inputPlaceholder')"
         rows="1"
         @keydown="handleKeydown"
         @compositionstart="handleCompositionStart"
@@ -284,18 +327,20 @@ function isImage(type: string): boolean {
         </NButton>
         <NButton
           size="small"
-          type="primary"
-          :disabled="!canSend || chatStore.isStreaming"
+          :type="chatStore.isStreaming && chatStore.busyInputMode ? 'warning' : 'primary'"
+          :disabled="!canSendNow"
           @click="handleSend"
         >
           <template #icon>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <svg v-if="chatStore.isStreaming && chatStore.busyInputMode" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </template>
-          {{ t('chat.send') }}
+          {{ chatStore.isStreaming && chatStore.busyInputMode ? t('chat.interrupt') : t('chat.send') }}
         </NButton>
       </div>
     </div>
   </div>
+  <ImageCropDialog :show="showCropDialog" @confirm="onAvatarCropped" @close="showCropDialog = false" />
 </template>
 
 <style scoped lang="scss">
@@ -471,7 +516,28 @@ function isImage(type: string): boolean {
   align-items: center;
 }
 
-// Drag-over state
+// User avatar
+.user-avatar {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: $text-muted;
+  transition: opacity $transition-fast;
+  &:hover { opacity: 0.8; }
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  svg { color: $text-muted; }
+}
+
 .input-wrapper.drag-over {
   border-color: var(--accent-info);
   border-style: dashed;

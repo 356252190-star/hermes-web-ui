@@ -1,7 +1,7 @@
 import { request, getBaseUrlValue, getApiKey } from '../client'
 
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
 }
 
@@ -42,6 +42,10 @@ export interface RunEvent {
 
 export async function startRun(body: StartRunRequest): Promise<StartRunResponse> {
   const headers: Record<string, string> = {}
+  // Pass session_id as a header so the gateway loads full conversation
+  // history (including tool messages) from the session DB instead of
+  // relying on the stripped user/assistant-only history in the body.
+  // This fixes the "lazy agent" bug where tool context is lost between turns.
   if (body.session_id) {
     headers['X-Hermes-Session-Id'] = body.session_id
   }
@@ -99,6 +103,10 @@ export function streamRunEvents(
       if (!closed) {
         closed = true
         source.close()
+        // Trigger onError so the store can clean up stream state and flush
+        // any pending busy-input message. Use a distinct error so the store
+        // can skip server-resync (the run is being interrupted intentionally).
+        onError(new Error('aborted'))
       }
     },
   } as unknown as AbortController

@@ -5,6 +5,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useAppStore } from './app'
 import { useProfilesStore } from './profiles'
+import { useSettingsStore } from './settings'
 import { detectThinkingBoundary } from '@/utils/thinking-parser'
 
 export interface Attachment {
@@ -350,6 +351,110 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value
     || (activeSessionId.value != null && resumingRuns.value.has(activeSessionId.value))
   )
+
+  // --- Busy input mode: queue messages during streaming ---
+  // When the user sends a message while streaming, we:
+  // 1. Immediately show the user message in the chat (so it's visible)
+  // 2. Abort the current SSE stream (triggers gateway's agent.interrupt())
+  // 3. When the run ends (onDone/onError), start a new run with the queued content
+  const pendingMessage = ref<{ content: string; attachments?: Attachment[] } | null>(null)
+  const busyInputMode = computed(() => {
+    try {
+      const settings = useSettingsStore()
+      return settings.display.busy_input_mode === 'interrupt'
+    } catch {
+      return false
+    }
+  })
+
+  // --- Avatar state (server-side storage) ---
+  const userAvatar = ref<string | null>(null)
+  const aiAvatar = ref<string | null>(null)
+
+  function getAuthToken(): string {
+    const pk = localStorage.getItem('hermes_profiles_key')
+    const ak = localStorage.getItem('hermes_api_key')
+    return (pk || ak || '').replace(/"/g, '')
+  }
+
+  async function uploadAvatar(type: 'ai' | 'user', file: File): Promise<boolean> {
+    try {
+      const profile = type === 'ai' ? getProfileName() : 'default'
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch(`/api/hermes/avatar/${type}?profile=${encodeURIComponent(profile)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${getAuthToken()}` },
+        body: formData
+      })
+      if (!res.ok) return false
+      // Set the URL for immediate display (with cache-busting)
+      const url = `/api/hermes/avatar/${type}?profile=${encodeURIComponent(profile)}&_t=${Date.now()}`
+      if (type === 'ai') aiAvatar.value = url
+      else userAvatar.value = url
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function setUserAvatar(dataUrl: string) {
+    // Legacy: accept data URL and convert to File for upload
+    userAvatar.value = dataUrl
+    // Try to upload to server in background
+    if (dataUrl.startsWith('data:')) {
+      fetch(dataUrl).then(r => r.blob()).then(blob => {
+        const file = new File([blob], 'avatar.png', { type: blob.type })
+        uploadAvatar('user', file)
+      }).catch(() => {})
+    }
+  }
+
+  function setAiAvatar(dataUrl: string) {
+    // Legacy: accept data URL and convert to File for upload
+    aiAvatar.value = dataUrl
+    // Try to upload to server in background
+    if (dataUrl.startsWith('data:')) {
+      fetch(dataUrl).then(r => r.blob()).then(blob => {
+        const file = new File([blob], 'avatar.png', { type: blob.type })
+        uploadAvatar('ai', file)
+      }).catch(() => {})
+    }
+  }
+
+  async function updateAiAvatar() {
+    try {
+      const profile = getProfileName()
+      const res = await fetch(`/api/hermes/avatar/status/ai?profile=${encodeURIComponent(profile)}`, {
+        headers: { Authorization: `Bearer ${getAuthToken()}` }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.hasCustom) {
+          aiAvatar.value = `/api/hermes/avatar/ai?profile=${encodeURIComponent(profile)}&_t=${Date.now()}`
+          return
+        }
+      }
+    } catch { /* ignore */ }
+    aiAvatar.value = null
+  }
+
+  async function loadUserAvatar() {
+    try {
+      const res = await fetch('/api/hermes/avatar/status/user?profile=default', {
+        headers: { Authorization: `Bearer ${getAuthToken()}` }
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.hasCustom) {
+          userAvatar.value = `/api/hermes/avatar/user?profile=default&_t=${Date.now()}`
+          return
+        }
+      }
+    } catch { /* ignore */ }
+    userAvatar.value = null
+  }
+
   const pollTimers = new Map<string, ReturnType<typeof setInterval>>()
   const pollSignatures = new Map<string, { sig: string, stableTicks: number }>()
 
@@ -759,8 +864,57 @@ export const useChatStore = defineStore('chat', () => {
     target.updatedAt = Date.now()
   }
 
-  async function sendMessage(content: string, attachments?: Attachment[]) {
-    if ((!content.trim() && !(attachments && attachments.length > 0)) || isStreaming.value) return
+  // Flush any pending message queued during busy input mode.
+  // The user message is already visible in the chat (added immediately in
+  // sendMessage's interrupt branch). This only starts the new run.
+  // skipUserMessage=true tells sendMessage to skip adding the user message
+  // again (it's already in the chat).
+  function flushPendingMessage() {
+    const pending = pendingMessage.value
+    if (!pending) return
+    pendingMessage.value = null
+    // Small delay to let the stream cleanup finish before starting a new run
+    setTimeout(() => {
+      void sendMessage(pending.content, pending.attachments, { skipUserMessage: true })
+    }, 100)
+  }
+
+  async function sendMessage(content: string, attachments?: Attachment[], opts?: { skipUserMessage?: boolean }) {
+    if (!content.trim() && !(attachments && attachments.length > 0)) return
+
+    // Busy input mode: if streaming, immediately show the user message,
+    // abort the current run, and queue a new run for after the abort completes.
+    if (isStreaming.value) {
+      if (busyInputMode.value) {
+        // 1. Immediately add the user message to the chat so it's visible
+        if (!activeSession.value) {
+          const session = createSession()
+          switchSession(session.id)
+        }
+        const sid = activeSessionId.value!
+        const userMsg: Message = {
+          id: uid(),
+          role: 'user',
+          content: content.trim(),
+          timestamp: Date.now(),
+          attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        }
+        addMessage(sid, userMsg)
+        updateSessionTitle(sid)
+        if (sid === activeSessionId.value) {
+          persistActiveMessages()
+          persistSessionsList()
+        }
+
+        // 2. Save the message content for the new run (after abort completes)
+        pendingMessage.value = { content, attachments }
+
+        // 3. Abort SSE — this triggers gateway's agent.interrupt() on disconnect
+        const ctrl = streamStates.value.get(sid)
+        if (ctrl) ctrl.abort()
+      }
+      return
+    }
 
     if (!activeSession.value) {
       const session = createSession()
@@ -770,29 +924,32 @@ export const useChatStore = defineStore('chat', () => {
     // Capture session ID at send time — all callbacks use this, not activeSessionId
     const sid = activeSessionId.value!
 
-    const userMsg: Message = {
-      id: uid(),
-      role: 'user',
-      content: content.trim(),
-      timestamp: Date.now(),
-      attachments: attachments && attachments.length > 0 ? attachments : undefined,
-    }
-    addMessage(sid, userMsg)
-    updateSessionTitle(sid)
-    // Persist immediately so a refresh before the first SSE event (e.g. the
-    // user closes the tab right after sending) still has the user's message
-    // and session title in the cache.
-    if (sid === activeSessionId.value) {
-      persistActiveMessages()
-      persistSessionsList()
+    // Skip adding user message if it was already added during interrupt
+    if (!opts?.skipUserMessage) {
+      const userMsg: Message = {
+        id: uid(),
+        role: 'user',
+        content: content.trim(),
+        timestamp: Date.now(),
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      }
+      addMessage(sid, userMsg)
+      updateSessionTitle(sid)
+      // Persist immediately so a refresh before the first SSE event (e.g. the
+      // user closes the tab right after sending) still has the user's message
+      // and session title in the cache.
+      if (sid === activeSessionId.value) {
+        persistActiveMessages()
+        persistSessionsList()
+      }
     }
 
     try {
       // Build conversation history from past messages
       const sessionMsgs = getSessionMsgs(sid)
       const history: ChatMessage[] = sessionMsgs
-        .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
-        .map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content }))
+        .filter(m => (m.role === 'user' || m.role === 'assistant' || m.role === 'tool') && m.content.trim())
+        .map(m => ({ role: m.role as 'user' | 'assistant' | 'system' | 'tool', content: m.content }))
 
       // Upload attachments and build input with file paths
       let inputText = content.trim()
@@ -804,13 +961,15 @@ export const useChatStore = defineStore('chat', () => {
           const base = `/api/hermes/download?path=${encodeURIComponent(f.path)}&name=${encodeURIComponent(f.name)}`
           return [f.name, token ? `${base}&token=${encodeURIComponent(token)}` : base]
         }))
-        const msgs = getSessionMsgs(sid)
-        const lastUser = msgs.findLast(m => m.id === userMsg.id)
-        if (lastUser?.attachments) {
-          lastUser.attachments = lastUser.attachments.map(a => {
-            const dl = urlMap.get(a.name)
-            return dl ? { ...a, url: dl } : a
-          })
+        if (!opts?.skipUserMessage) {
+          const msgs = getSessionMsgs(sid)
+          const lastUser = msgs.findLast(m => m.role === 'user')
+          if (lastUser?.attachments) {
+            lastUser.attachments = lastUser.attachments.map(a => {
+              const dl = urlMap.get(a.name)
+              return dl ? { ...a, url: dl } : a
+            })
+          }
         }
         const pathParts = uploaded.map(f => `[File: ${f.name}](${urlMap.get(f.name)})`)
         inputText = inputText ? inputText + '\n\n' + pathParts.join('\n') : pathParts.join('\n')
@@ -1090,6 +1249,8 @@ export const useChatStore = defineStore('chat', () => {
           }
           cleanup()
           updateSessionTitle(sid)
+          // Send pending message if busy input mode queued one during this run
+          flushPendingMessage()
         },
         // onError
         // Mobile browsers drop EventSource when the tab backgrounds / screen
@@ -1099,7 +1260,10 @@ export const useChatStore = defineStore('chat', () => {
         // the real final answer. If the server fetch itself fails, we leave
         // whatever text we already streamed in place — no visible error.
         (err) => {
-          console.warn('SSE connection dropped, resyncing from server:', err.message)
+          const isAbort = err.message === 'aborted'
+          if (!isAbort) {
+            console.warn('SSE connection dropped, resyncing from server:', err.message)
+          }
           const msgs = getSessionMsgs(sid)
           const last = msgs[msgs.length - 1]
           if (last?.isStreaming) {
@@ -1113,15 +1277,19 @@ export const useChatStore = defineStore('chat', () => {
             }
           })
           cleanup()
-          if (sid === activeSessionId.value) {
+          // Skip server resync on intentional abort — the run was interrupted
+          // by the user and a new run is about to start.
+          if (!isAbort && sid === activeSessionId.value) {
             void refreshActiveSession()
           }
           // The run might still be going on the server side (SSE drop doesn't
           // abort it). If we still have an in-flight record, fall back to
           // polling fetchSession to keep the user updated.
-          if (readInFlight(sid)) {
+          if (!isAbort && readInFlight(sid)) {
             startPolling(sid)
           }
+          // Send pending message if busy input mode queued one during this run
+          flushPendingMessage()
         },
       )
 
@@ -1205,6 +1373,79 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  function clearThinkingObservationFor(_sessionId: string) {
+    // messageId 与 sessionId 的关联未单独持有；方案是切会话时一律清空。
+    // 这符合 spec 定义：observation 是"当前会话范围内"的 transient 状态。
+    thinkingObservation.clear()
+  }
+
+  // ── Multi-profile state switching ──────────────────────────────────────
+  // In-memory map that caches each profile's sessions/activeSessionId/messages
+  // so switching profiles is instant without a page reload.
+  const profileStateMap = ref<Map<string, {
+    sessions: Session[]
+    activeSessionId: string | null
+    messages: Map<string, Message[]>
+  }>>(new Map())
+
+  function saveProfileState(profileName: string) {
+    // Build a messages map from the current sessions
+    const msgsMap = new Map<string, Message[]>()
+    for (const s of sessions.value) {
+      if (s.messages.length > 0) {
+        msgsMap.set(s.id, [...s.messages])
+      }
+    }
+    profileStateMap.value.set(profileName, {
+      sessions: sessions.value.map(s => ({ ...s, messages: [] })),
+      activeSessionId: activeSessionId.value,
+      messages: msgsMap,
+    })
+  }
+
+  function saveCurrentProfileState() {
+    saveProfileState(getProfileName())
+  }
+
+  function loadProfileState(profileName: string) {
+    const cached = profileStateMap.value.get(profileName)
+    if (cached) {
+      // Restore sessions with their messages from the in-memory cache
+      sessions.value = cached.sessions.map(s => ({
+        ...s,
+        messages: cached.messages.get(s.id) || [],
+      }))
+      activeSessionId.value = cached.activeSessionId
+      // Restore activeSession ref
+      if (cached.activeSessionId) {
+        activeSession.value = sessions.value.find(s => s.id === cached.activeSessionId) || null
+      } else {
+        activeSession.value = null
+      }
+    } else {
+      // No cached state — start fresh
+      sessions.value = []
+      activeSessionId.value = null
+      activeSession.value = null
+    }
+  }
+
+  async function switchChatProfile(profileName: string, fromProfile?: string) {
+    // 1. Save current profile's in-memory state under the OLD profile name.
+    //    When called from ChatView's watcher, `fromProfile` is the previous
+    //    profile name (before activeProfileName changed). Without this,
+    //    saveCurrentProfileState() would use the already-changed activeProfileName
+    //    and save the old profile's data under the wrong key.
+    if (fromProfile) {
+      saveProfileState(fromProfile)
+    } else {
+      saveCurrentProfileState()
+    }
+    // 2. Load the target profile's state from the map (or empty)
+    loadProfileState(profileName)
+    // 3. Refresh sessions from the API for the new profile
+    await loadSessions()
+  }
   function clearProviderFromSessions(provider: string) {
     if (!provider) return
     const target = provider.toLowerCase()
@@ -1219,12 +1460,6 @@ export const useChatStore = defineStore('chat', () => {
     if (dirty) persistSessionsList()
   }
 
-  function clearThinkingObservationFor(_sessionId: string) {
-    // messageId 与 sessionId 的关联未单独持有；方案是切会话时一律清空。
-    // 这符合 spec 定义：observation 是"当前会话范围内"的 transient 状态。
-    thinkingObservation.clear()
-  }
-
   return {
     sessions,
     activeSessionId,
@@ -1237,11 +1472,19 @@ export const useChatStore = defineStore('chat', () => {
     isLoadingSessions,
     sessionsLoaded,
     isLoadingMessages,
+    busyInputMode,
+    pendingMessage,
+    userAvatar,
+    aiAvatar,
+    setUserAvatar,
+    setAiAvatar,
+    updateAiAvatar,
+    loadUserAvatar,
+    uploadAvatar,
 
     newChat,
     switchSession,
     switchSessionModel,
-    clearProviderFromSessions,
     deleteSession,
     sendMessage,
     stopStreaming,
@@ -1252,5 +1495,7 @@ export const useChatStore = defineStore('chat', () => {
     noteReasoningStart,
     noteReasoningEnd,
     clearThinkingObservationFor,
+    clearProviderFromSessions,
+    switchChatProfile,
   }
 })
