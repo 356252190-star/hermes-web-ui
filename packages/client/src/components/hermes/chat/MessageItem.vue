@@ -8,6 +8,7 @@ import MarkdownRenderer from "./MarkdownRenderer.vue";
 import { parseThinking, countThinkingChars } from "@/utils/thinking-parser";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
+import ImageCropDialog from "@/components/hermes/ImageCropDialog.vue";
 import {
   copyTextToClipboard,
   handleCodeBlockCopyClick,
@@ -44,6 +45,31 @@ async function copyBubbleContent() {
   } catch {
     toast.error(t('chat.copyFailed'))
   }
+}
+
+// AI avatar
+const showCropDialog = ref(false)
+const avatarFileInput = ref<HTMLInputElement>()
+const aiAvatarSrc = computed(() => chatStore.aiAvatar || '/logo.png')
+
+function openAiAvatarPicker() { avatarFileInput.value?.click() }
+function onAiAvatarFileChange(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  if (file.type === 'image/gif' || file.type === 'image/apng') {
+    if (file.size > 5 * 1024 * 1024) return
+    chatStore.uploadAvatar('ai', file)
+    return
+  }
+  showCropDialog.value = true
+}
+function onAiAvatarCropped(dataUrl: string) {
+  fetch(dataUrl).then(r => r.blob()).then(blob => {
+    const file = new File([blob], 'avatar.png', { type: blob.type })
+    chatStore.uploadAvatar('ai', file)
+  }).catch(() => {})
+  showCropDialog.value = false
+
 }
 
 const parsedThinking = computed(() =>
@@ -340,10 +366,14 @@ const renderedToolResult = computed(() => {
       <div class="msg-body">
         <img
           v-if="message.role === 'assistant'"
-          src="/logo.png"
+          :src="aiAvatarSrc"
           alt="Hermes"
           class="msg-avatar"
+          @click="openAiAvatarPicker"
+          style="cursor: pointer;"
+          title="Change AI avatar"
         />
+        <input ref="avatarFileInput" type="file" accept="image/*" style="display:none" @change="onAiAvatarFileChange" />
         <div class="msg-content" :class="message.role">
           <div class="message-bubble" :class="{ system: isSystem }">
             <div v-if="hasAttachments" class="msg-attachments">
@@ -456,6 +486,7 @@ const renderedToolResult = computed(() => {
       <img :src="previewUrl" class="image-preview-img" @click="previewUrl = null" />
     </div>
   </Teleport>
+  <ImageCropDialog :show="showCropDialog" @confirm="onAiAvatarCropped" @close="showCropDialog = false" />
 </template>
 
 <style scoped lang="scss">

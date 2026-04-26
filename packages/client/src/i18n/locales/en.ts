@@ -163,6 +163,11 @@ export default {
     copyBubble: 'Copy message',
     copiedBubble: 'Message copied',
     copyFailed: 'Copy failed',
+    cropAvatar: 'Crop Avatar',
+    clickToSelectImage: 'Click to select an image',
+    imageTooLarge: 'Image too large (max 5MB)',
+    changeAvatar: 'Change Avatar',
+ (feat: add custom avatar upload with image cropping)
   },
 
   // Jobs

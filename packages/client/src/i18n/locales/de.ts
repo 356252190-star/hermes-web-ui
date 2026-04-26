@@ -140,6 +140,11 @@ export default {
     copyBubble: 'Nachricht kopieren',
     copiedBubble: 'Nachricht kopiert',
     copyFailed: 'Kopieren fehlgeschlagen',
+    cropAvatar: 'Avatar zuschneiden',
+    clickToSelectImage: 'Klicken Sie, um ein Bild auszuwählen',
+    imageTooLarge: 'Bild zu groß (max. 5MB)',
+    changeAvatar: 'Avatar ändern',
+ (feat: add custom avatar upload with image cropping)
   },
 
   // Jobs

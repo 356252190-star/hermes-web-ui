@@ -163,6 +163,11 @@ export default {
     copyBubble: '复制消息',
     copiedBubble: '已复制',
     copyFailed: '复制失败',
+    cropAvatar: '裁剪头像',
+    clickToSelectImage: '点击选择图片',
+    imageTooLarge: '图片过大（最大5MB）',
+    changeAvatar: '更换头像',
+ (feat: add custom avatar upload with image cropping)
   },
 
   // 定时任务

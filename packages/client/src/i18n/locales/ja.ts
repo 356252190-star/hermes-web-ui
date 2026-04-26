@@ -140,6 +140,11 @@ export default {
     copyBubble: 'メッセージをコピー',
     copiedBubble: 'コピーしました',
     copyFailed: 'コピーに失敗しました',
+    cropAvatar: 'アバターをトリミング',
+    clickToSelectImage: 'クリックして画像を選択',
+    imageTooLarge: '画像が大きすぎます（最大5MB）',
+    changeAvatar: 'アバターを変更',
+ (feat: add custom avatar upload with image cropping)
   },
 
   // スケジュールジョブ
