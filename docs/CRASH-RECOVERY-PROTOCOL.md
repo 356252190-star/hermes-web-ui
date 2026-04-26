@@ -6,274 +6,166 @@
 ## Overview
 
 ```
-┌──────────────┐    detect     ┌──────────────┐    read    ┌──────────────┐
-│  Watchdog    │───(1min)────→│  Collect     │──────────→│  Classify    │
-│  (systemd)   │              │  Logs & Info │           │  Error Type  │
-└──────────────┘              └──────────────┘           └──────┬───────┘
-                                                                │
-                              ┌─────────────────────────────────┤
-                              │                                 │
-                         ┌────▼────┐   ┌────────┐   ┌─────────▼────────┐
-                         │ Level 1 │   │ Level 2│   │    Level 3       │
-                         │ Auto    │   │ Auto   │   │  Agent-Assisted  │
-                         │ Restart │   │ Fix    │   │  Manual Fix      │
-                         └─────────┘   └────────┘   └──────────────────┘
+┌──────────────┐    detect     ┌──────────────┐   Phase 1   ┌──────────────┐
+│  Watchdog    │───(30s)──────→│  Fast        │───(3x)────→│  Auto        │
+│  (systemd)   │               │  Restart     │             │  Diagnose    │
+└──────────────┘               └──────────────┘             └──────┬───────┘
+                                                                    │
+                                                           ┌──────▼───────┐
+                                                           │  Phase 3     │
+                                                           │  Agent       │
+                                                           │  Intervention│
+                                                           └──────────────┘
 ```
 
-## Level Classification
+### Three-Phase Recovery
 
-### Level 1: Auto-Restart (Simple Crashes)
-**Trigger**: Process exited, OOM killed, signal 9/11/15
-**Action**: Watchdog auto-restarts, no agent needed
+| Phase | What | How |
+|-------|------|-----|
+| **Phase 1** | Fast Restart | Watchdog kills + restarts process (3 attempts) |
+| **Phase 2** | Auto-Diagnose | Watchdog runs `crash-diagnose.sh`, checks 10 known patterns, applies fix |
+| **Phase 3** | Agent Report | Writes CRASH_SIGNAL + diagnostic JSON for agent to read and fix |
 
+**Key: Phase 2 is fully automatic** — no agent needed for known error patterns.
+
+## Error Classification
+
+| Error Pattern | Class | Phase 2 Fix |
+|---|---|---|
+| `EADDRINUSE` | PORT_CONFLICT | Kill stale process on port |
+| `JavaScript heap out of memory` | OOM | Clean memory + kill heavy processes |
+| `MODULE_NOT_FOUND` | MISSING_MODULE | `npm install` + rebuild |
+| `EACCES` / permission denied | PERMISSION | Fix file ownership/permissions |
+| `ENOSPC` | DISK_FULL | Clean logs, uploads, journal |
+| `SyntaxError` / `TypeError` | CODE_ERROR | Rebuild from source |
+| `ECONNREFUSED` to upstream | UPSTREAM_DOWN | Restart + check upstream |
+| Corrupted node_modules | CORRUPTED_DEPS | Full reinstall |
+| Unknown / no pattern | UNKNOWN | Agent review needed |
+
+## Quick Reference
+
+### Check if web-ui is down
 ```bash
-# Watchdog handles this automatically
-# Check if recovered:
+# Health check
 curl -s http://127.0.0.1:8648/health | jq .
+
+# Process check
+pgrep -f "hermes-web-ui.*dist/server"
+
+# CRASH_SIGNAL check
+cat ~/.hermes-web-ui/logs/CRASH_SIGNAL 2>/dev/null
 ```
 
-### Level 2: Auto-Fix (Known Patterns)
-**Trigger**: Repeated crashes after restart, known error patterns
-**Action**: Agent follows fix recipes below
+### Run manual diagnosis
+```bash
+# Human-readable output
+bash ~/.hermes-web-ui/crash-diagnose.sh
 
-### Level 3: Agent-Assisted (Unknown Errors)
-**Trigger**: Fix recipes don't apply, novel errors
-**Action**: Agent reads crash log, applies reasoning, generates fix
+# JSON output (for agent consumption)
+bash ~/.hermes-web-ui/crash-diagnose.sh --json
+```
 
----
+### Maintenance mode (during updates)
+```bash
+# Enable — watchdog pauses
+touch ~/.hermes-web-ui/.maintenance
 
-## Step 1: Collect Information
+# Disable — watchdog resumes
+rm ~/.hermes-web-ui/.maintenance
+```
+
+## Phase 3: Agent-Assisted Fix (When Auto-Diagnose Fails)
+
+When CRASH_SIGNAL exists with `STATUS=AGENT_REVIEW_NEEDED`:
 
 ```bash
-# 1.1 Check process status
-ps aux | grep hermes-web-ui | grep -v grep
+# 1. Read the signal
+cat ~/.hermes-web-ui/logs/CRASH_SIGNAL
 
-# 1.2 Check systemd status (if watchdog installed)
-systemctl status hermes-web-ui-watchdog --no-pager -l
+# 2. Run diagnosis
+bash ~/.hermes-web-ui/crash-diagnose.sh
 
-# 1.3 Read crash log (most recent)
-CRASH_LOG=$(ls -t ~/.hermes-web-ui/logs/crash-*.log 2>/dev/null | head -1)
-if [ -n "$CRASH_LOG" ]; then
-    cat "$CRASH_LOG"
-else
-    echo "No crash log found"
-fi
+# 3. Read crash log
+cat $(ls -t ~/.hermes-web-ui/logs/crash-*.log | head -1)
 
-# 1.4 Check system resources
-free -h
-df -h /home
-uptime
+# 4. Check system
+free -h && df -h / && uptime
 
-# 1.5 Check Node.js version
+# 5. Check node version
 node --version
 
-# 1.6 Check if port is occupied
-lsof -i :8648 2>/dev/null || ss -tlnp | grep 8648
-```
+# 6. Apply fix based on ERROR_CLASS in CRASH_SIGNAL:
+#    - PORT_CONFLICT → kill stale process, check port
+#    - OOM → increase memory, check for leaks
+#    - MISSING_MODULE → npm install + rebuild
+#    - PERMISSION → chown/chmod
+#    - DISK_FULL → clean disk
+#    - CODE_ERROR → read stack trace, fix code, rebuild
+#    - UPSTREAM_DOWN → restart hermes agent first
+#    - UNKNOWN → read full crash log, analyze stack trace
 
-## Step 2: Classify Error
+# 7. After fix — clear signal and restart watchdog
+rm ~/.hermes-web-ui/logs/CRASH_SIGNAL
+systemctl --user restart hermes-web-ui-watchdog
 
-Read the crash log and classify into one of these categories:
-
-| Error Pattern | Category | Fix Level |
-|---|---|---|
-| `EADDRINUSE` | Port conflict | Level 2 |
-| `JavaScript heap out of memory` | OOM | Level 2 |
-| `MODULE_NOT_FOUND` | Missing dependency | Level 2 |
-| `SyntaxError` / `TypeError` | Code error | Level 2-3 |
-| `EACCES` / permission denied | Permission | Level 2 |
-| `ENOSPC` | Disk full | Level 2 |
-| `SIGKILL` / OOM killed | System OOM | Level 2 |
-| `Cannot find module` after npm install | Corrupted node_modules | Level 2 |
-| `ECONNREFUSED` to upstream | Upstream down | Level 2 |
-| WebSocket connection errors | Network/proxy | Level 3 |
-| Unknown / no crash log | Unknown | Level 3 |
-
-## Step 3: Apply Fix
-
-### Level 2 Fix Recipes
-
-#### Recipe: EADDRINUSE (Port 8648 occupied)
-```bash
-# Find and kill the old process
-OLD_PID=$(lsof -ti :8648 2>/dev/null)
-if [ -n "$OLD_PID" ]; then
-    kill "$OLD_PID"
-    sleep 2
-    # Force kill if still alive
-    kill -9 "$OLD_PID" 2>/dev/null
-fi
-# Restart
-systemctl restart hermes-web-ui-watchdog
-```
-
-#### Recipe: OOM (Out of Memory)
-```bash
-# Check what's eating memory
-ps aux --sort=-%mem | head -10
-
-# Clean up system
-sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-
-# Restart with increased memory limit
-# Edit systemd service: MemoryMax=2G
-systemctl edit hermes-web-ui --force
-# Add:
-# [Service]
-# MemoryMax=2G
-# MemoryHigh=1536M
-systemctl daemon-reload
-systemctl restart hermes-web-ui-watchdog
-```
-
-#### Recipe: MODULE_NOT_FOUND
-```bash
-cd /path/to/hermes-web-ui
-rm -rf node_modules package-lock.json
-npm install
-npm run build
-systemctl restart hermes-web-ui-watchdog
-```
-
-#### Recipe: Permission Denied (EACCES)
-```bash
-# Fix upload directory permissions
-chown -R $(whoami):$(whoami) ~/.hermes-web-ui/
-chmod -R 755 ~/.hermes-web-ui/
-
-# Fix dist permissions
-chown -R $(whoami):$(whoami) /path/to/hermes-web-ui/dist/
-systemctl restart hermes-web-ui-watchdog
-```
-
-#### Recipe: Disk Full (ENOSPC)
-```bash
-# Find large files
-du -sh ~/.hermes-web-ui/upload/* 2>/dev/null | sort -rh | head -5
-du -sh ~/.hermes-web-ui/logs/* 2>/dev/null | sort -rh | head -5
-
-# Clean old logs
-find ~/.hermes-web-ui/logs/ -name "crash-*.log" -mtime +7 -delete
-find ~/.hermes-web-ui/logs/ -name "*.log" -size +10M -delete
-
-# Clean old uploads
-find ~/.hermes-web-ui/upload/ -mtime +30 -type f -delete
-
-# Clean systemd journal
-journalctl --vacuum-size=100M
-
-# Verify space freed
-df -h /
-```
-
-#### Recipe: Upstream Hermes Agent Down
-```bash
-# Check upstream
-curl -s http://127.0.0.1:8642/health
-
-# If upstream is down, restart it
-# Check hermes process
-ps aux | grep "hermes" | grep -v grep
-
-# Restart hermes agent (method depends on installation)
-hermes serve --port 8642 &
-sleep 3
-
-# Then restart web-ui
-systemctl restart hermes-web-ui-watchdog
-```
-
-#### Recipe: Corrupted node_modules
-```bash
-cd /path/to/hermes-web-ui
-npm cache clean --force
-rm -rf node_modules
-npm install
-npm run build
-systemctl restart hermes-web-ui-watchdog
-```
-
-### Level 3: Agent-Assisted Diagnosis
-
-When no recipe matches, the agent should:
-
-```bash
-# 1. Read the full crash log
-cat ~/.hermes-web-ui/logs/crash-*.log | tail -100
-
-# 2. Check Node.js error details
-# Look for: stack trace, error code, file path, line number
-
-# 3. Check recent code changes
-cd /path/to/hermes-web-ui
-git log --oneline -5
-git diff HEAD~1 --stat
-
-# 4. Try TypeScript compilation check
-npx vue-tsc --noEmit 2>&1 | head -30
-
-# 5. Try building
-npm run build 2>&1 | tail -30
-
-# 6. Based on findings, apply targeted fix
-#    - If build error: fix the TypeScript/Vue error
-#    - If runtime error: check the specific file/line
-#    - If memory issue: increase limits or find leak
-#    - If network issue: check upstream/proxy config
-```
-
-## Step 4: Verify Recovery
-
-```bash
-# 4.1 Health check
-sleep 5
-HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8648/health)
-if [ "$HEALTH" = "200" ]; then
-    echo "✅ Recovery successful"
-else
-    echo "❌ Still down (HTTP $HEALTH)"
-    # Read latest crash log for further diagnosis
-    ls -lt ~/.hermes-web-ui/logs/crash-*.log | head -3
-fi
-
-# 4.2 Check watchdog is running
-systemctl is-active hermes-web-ui-watchdog
-
-# 4.3 Quick smoke test
+# 8. Verify
 curl -s http://127.0.0.1:8648/health | jq .
 ```
 
-## Step 5: Report
+## Safety Features
 
-After recovery, report to the user:
-1. What caused the crash (error type + root cause)
-2. What fix was applied
-3. Current status (healthy/down)
-4. Prevention recommendation (if applicable)
+### Global Circuit Breaker
+- If **30 failures** accumulate in one day, watchdog stops permanently
+- Requires manual intervention to restart
+- Prevents infinite restart loops on persistent issues
 
----
+### Maintenance Mode
+- Touch `.maintenance` file before any manual update
+- Watchdog pauses all checks during maintenance
+- Prevents watchdog from fighting with intentional restarts
 
-## Crash Signal File
-
-The watchdog writes `~/.hermes-web-ui/logs/CRASH_SIGNAL` when auto-restart fails.
-Any agent can check this file to detect unattended crashes:
-
-```bash
-if [ -f ~/.hermes-web-ui/logs/CRASH_SIGNAL ]; then
-    echo "⚠️ Web-UI crashed and auto-restart failed!"
-    cat ~/.hermes-web-ui/logs/CRASH_SIGNAL
-    # Follow this protocol to diagnose and fix
-fi
-```
+### Port Release Safety
+- Before restart, watchdog waits up to 10s for port to be free
+- Prevents new process from failing due to port conflict
 
 ## Directory Structure
 
 ```
 ~/.hermes-web-ui/
 ├── logs/
-│   ├── crash-2026-04-26T12-00-00.log    # Crash dump
-│   ├── crash-2026-04-26T12-05-00.log    # More recent
-│   └── CRASH_SIGNAL                      # Auto-fix failed marker
-├── upload/                               # User uploads (avatars, etc.)
-└── config.json                           # App configuration
+│   ├── crash-2026-04-26T12-00-00.log    # Crash dump (auto-generated)
+│   └── CRASH_SIGNAL                       # Auto-fix failed marker
+├── watchdog-state                         # Persistent failure counter
+├── crash-diagnose.sh                      # Standalone diagnosis tool
+├── watchdog.sh                            # Watchdog script
+├── .maintenance                           # Maintenance mode flag
+├── upload/                                # User uploads (avatars, etc.)
+└── config.json                            # App configuration
+```
+
+## Recovery Flow Diagram
+
+```
+Web-UI crashes
+    │
+    ▼
+Phase 1: Fast Restart (3 attempts)
+    │
+    ├── SUCCESS → ✅ Service restored
+    │
+    └── FAILURE → Phase 2: Auto-Diagnose
+        │
+        ├── Matched known pattern → Apply fix → Restart
+        │   │
+        │   ├── SUCCESS → ✅ Service restored
+        │   └── FAILURE → Phase 3: Agent Report
+        │
+        └── No match → Phase 3: Agent Report
+            │
+            ▼
+        Write CRASH_SIGNAL + crash log
+        Agent reads, diagnoses, fixes
+            │
+            ▼
+        ✅ Service restored
 ```
