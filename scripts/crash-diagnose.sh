@@ -32,6 +32,17 @@ DISK_USAGE=$(df -h / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
 MEM_AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
 CRASH_SIGNAL_EXISTS=$([[ -f "$LOG_DIR/CRASH_SIGNAL" ]] && echo "true" || echo "false")
 
+# Check hermes agent availability (for Phase 3)
+HERMES_AGENT_AVAILABLE=false
+HERMES_CLI_FOUND=false
+command -v hermes >/dev/null 2>&1 && HERMES_CLI_FOUND=true
+for agent_port in 8015 18789 8642 8643; do
+    if curl -s --connect-timeout 2 "http://127.0.0.1:$agent_port/health" >/dev/null 2>&1; then
+        HERMES_AGENT_AVAILABLE=true
+        break
+    fi
+done
+
 # Find latest crash log
 LATEST_CRASH_LOG=""
 CRASH_LOG_CONTENT=""
@@ -65,6 +76,8 @@ if $JSON_MODE; then
   "disk_usage_pct": ${DISK_USAGE:-0},
   "mem_avail_mb": ${MEM_AVAIL:-0},
   "crash_signal_exists": $CRASH_SIGNAL_EXISTS,
+  "hermes_agent_available": $HERMES_AGENT_AVAILABLE,
+  "hermes_cli_found": $HERMES_CLI_FOUND,
   "error_class": "$ERROR_CLASS",
   "latest_crash_log": "$LATEST_CRASH_LOG",
   "recommended_action": "$(case $ERROR_CLASS in
@@ -91,6 +104,8 @@ else
     echo "Memory free:   ${MEM_AVAIL:-?} MB"
     echo "Crash signal:  $CRASH_SIGNAL_EXISTS"
     echo "Error class:   $ERROR_CLASS"
+    echo "Hermes CLI:    $HERMES_CLI_FOUND"
+    echo "Agent avail:   $HERMES_AGENT_AVAILABLE"
     echo ""
     if [[ -n "$LATEST_CRASH_LOG" ]]; then
         echo "Latest crash log: $LATEST_CRASH_LOG"
