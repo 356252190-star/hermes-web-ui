@@ -160,6 +160,9 @@ export default {
     thinkingHide: 'Hide thinking',
     thinkingDuration: 'Observed {duration}',
     thinkingChars: '{count} chars',
+    copyBubble: 'Copy message',
+    copiedBubble: 'Message copied',
+    copyFailed: 'Copy failed',
   },
 
   // Jobs

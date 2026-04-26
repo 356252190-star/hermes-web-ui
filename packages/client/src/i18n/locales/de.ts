@@ -137,6 +137,9 @@ export default {
     thinkingHide: 'Denkprozess ausblenden',
     thinkingDuration: 'Beobachtet {duration}',
     thinkingChars: '{count} Zeichen',
+    copyBubble: 'Nachricht kopieren',
+    copiedBubble: 'Nachricht kopiert',
+    copyFailed: 'Kopieren fehlgeschlagen',
   },
 
   // Jobs

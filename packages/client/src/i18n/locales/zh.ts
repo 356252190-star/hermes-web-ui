@@ -160,6 +160,9 @@ export default {
     thinkingHide: '收起思考过程',
     thinkingDuration: '已观察 {duration}',
     thinkingChars: '{count} 字',
+    copyBubble: '复制消息',
+    copiedBubble: '已复制',
+    copyFailed: '复制失败',
   },
 
   // 定时任务

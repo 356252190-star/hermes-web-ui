@@ -137,6 +137,9 @@ export default {
     thinkingHide: 'Ocultar raciocínio',
     thinkingDuration: 'Observado {duration}',
     thinkingChars: '{count} caracteres',
+    copyBubble: 'Copiar mensagem',
+    copiedBubble: 'Mensagem copiada',
+    copyFailed: 'Falha ao copiar',
   },
 
   // Jobs

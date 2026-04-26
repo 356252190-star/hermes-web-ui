@@ -137,6 +137,9 @@ export default {
     thinkingHide: '思考過程を隠す',
     thinkingDuration: '観測 {duration}',
     thinkingChars: '{count} 文字',
+    copyBubble: 'メッセージをコピー',
+    copiedBubble: 'コピーしました',
+    copyFailed: 'コピーに失敗しました',
   },
 
   // スケジュールジョブ
