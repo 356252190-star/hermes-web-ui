@@ -20,13 +20,33 @@ const ALLOWED_OUTPUT_NAMES = ['thinking-custom.mp4', 'thinking-custom.gif', 'thi
 
 // Formats that browsers can play natively (no conversion needed)
 const NATIVE_FORMATS = ['.mp4', '.gif', '.webm']
-// Formats that need conversion to MP4
+// Formats that need conversion to MP4 (requires ffmpeg)
 const CONVERT_FORMATS = ['.mov', '.avi', '.mkv']
 
-// Ensure animation directory exists
-async function ensureDir() {
-  if (!existsSync(ANIMATION_DIR)) {
-    await mkdir(ANIMATION_DIR, { recursive: true })
+const EXT_TYPE_MAP: Record<string, string> = {
+  '.mp4': 'mp4', '.gif': 'gif', '.webm': 'webm'
+}
+
+const MIME_MAP: Record<string, string> = {
+  'mp4': 'video/mp4', 'gif': 'image/gif', 'webm': 'video/webm'
+}
+
+/** Check if ffmpeg is available on the system PATH (cached) */
+let _ffmpegAvailable: boolean | null = null
+async function isFfmpegAvailable(): Promise<boolean> {
+  if (_ffmpegAvailable !== null) return _ffmpegAvailable
+  try {
+    await execFileAsync('ffmpeg', ['-version'], { timeout: 5000 })
+    _ffmpegAvailable = true
+  } catch {
+    _ffmpegAvailable = false
+  }
+  return _ffmpegAvailable
+}
+
+async function ensureDir(dir: string) {
+  if (!existsSync(dir)) {
+    await mkdir(dir, { recursive: true })
   }
 }
 
@@ -37,8 +57,7 @@ function safePath(dir: string, filename: string): string | null {
   return resolved
 }
 
-/** Parse multipart/form-data body without external dependencies.
- *  Reads the full request body, splits on boundary, extracts the file part. */
+/** Parse multipart/form-data body without external dependencies. */
 async function parseMultipartBody(
   req: NodeJS.ReadableStream,
   contentType: string
@@ -58,14 +77,13 @@ async function parseMultipartBody(
   const raw = Buffer.concat(chunks)
   const boundaryBuf = Buffer.from(boundary)
 
-  // Find all parts by scanning for boundary markers
   const parts: Buffer[] = []
   let start = 0
   while (true) {
     const idx = raw.indexOf(boundaryBuf, start)
     if (idx === -1) break
     if (start > 0) {
-      parts.push(raw.subarray(start + 2, idx)) // skip CRLF after boundary
+      parts.push(raw.subarray(start + 2, idx))
     }
     start = idx + boundaryBuf.length
   }
@@ -74,9 +92,8 @@ async function parseMultipartBody(
     const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'))
     if (headerEnd === -1) continue
     const header = part.subarray(0, headerEnd).toString('utf-8')
-    const data = part.subarray(headerEnd + 4, part.length - 2) // strip trailing CRLF
+    const data = part.subarray(headerEnd + 4, part.length - 2)
 
-    // Try filename*= (RFC 5987) first, then filename=""
     const filenameStarMatch = header.match(/filename\*=UTF-8''(.+)/i)
     let filename = ''
     if (filenameStarMatch) {
@@ -92,10 +109,10 @@ async function parseMultipartBody(
   return null
 }
 
-// Upload thinking animation
+// Upload custom thinking animation
 thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) => {
   try {
-    await ensureDir()
+    await ensureDir(ANIMATION_DIR)
 
     const contentType = ctx.get('content-type') || ''
     if (!contentType.startsWith('multipart/form-data')) {
@@ -122,6 +139,16 @@ thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) 
       return
     }
 
+    // Check ffmpeg availability upfront if conversion is needed
+    if (needsConversion && !(await isFfmpegAvailable())) {
+      ctx.status = 400
+      ctx.body = {
+        error: 'ffmpeg is not installed. Install ffmpeg to convert MOV/AVI/MKV files, or use a browser-native format (GIF, MP4, WebM).'
+      }
+      return
+    }
+
+    // Write to temp file first
     const tempId = randomBytes(8).toString('hex')
     const tempPath = safePath(ANIMATION_DIR, `temp_${tempId}${ext}`)
     if (!tempPath) {
@@ -129,34 +156,35 @@ thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) 
       ctx.body = { error: 'Invalid temp path' }
       return
     }
-
     await writeFile(tempPath, fileData)
 
     try {
       if (isNative) {
-        const extMap: Record<string, string> = {
-          '.mp4': 'mp4',
-          '.gif': 'gif',
-          '.webm': 'webm'
-        }
-        const outputExt = extMap[ext] || 'mp4'
-        const outputName = `thinking-custom.${outputExt}`
+        // Native format — save directly, no conversion needed
+        const type = EXT_TYPE_MAP[ext] || 'mp4'
+        const outputName = `thinking-custom.${type}`
         const outputPath = safePath(ANIMATION_DIR, outputName)
         if (!outputPath || !ALLOWED_OUTPUT_NAMES.includes(outputName)) {
           ctx.status = 400
           ctx.body = { error: 'Invalid output filename' }
           return
         }
+        // Remove other format files so only one custom animation exists
+        for (const name of ALLOWED_OUTPUT_NAMES) {
+          if (name !== outputName) {
+            const fp = safePath(ANIMATION_DIR, name)
+            if (fp && existsSync(fp)) try { await unlink(fp) } catch {}
+          }
+        }
         await writeFile(outputPath, fileData)
-
         ctx.body = {
           success: true,
-          type: outputExt,
+          type,
           path: '/api/hermes/thinking-animation/file',
           message: `${ext.toUpperCase()} uploaded successfully (no conversion needed)`
         }
       } else {
-        // MOV, AVI, MKV: convert to MP4 (browsers can't play these natively)
+        // Convertible format — use ffmpeg to convert to MP4
         const outputPath = safePath(ANIMATION_DIR, 'thinking-custom.mp4')
         if (!outputPath) {
           ctx.status = 400
@@ -171,6 +199,14 @@ thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) 
           '-y', outputPath
         ], { timeout: 60000 })
 
+        // Remove non-MP4 custom animations after successful conversion
+        for (const name of ALLOWED_OUTPUT_NAMES) {
+          if (name !== 'thinking-custom.mp4') {
+            const fp = safePath(ANIMATION_DIR, name)
+            if (fp && existsSync(fp)) try { await unlink(fp) } catch {}
+          }
+        }
+
         ctx.body = {
           success: true,
           type: 'mp4',
@@ -178,11 +214,10 @@ thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) 
           message: `${ext.toUpperCase()} converted to MP4 successfully`
         }
       }
-    } catch (ffmpegError: any) {
+    } catch (err: any) {
       ctx.status = 400
-      ctx.body = { error: `Video conversion failed: ${ffmpegError.message}` }
+      ctx.body = { error: `Video conversion failed: ${err.message}` }
     } finally {
-      // Clean up temp file
       try { await unlink(tempPath) } catch {}
     }
   } catch (error: any) {
@@ -192,48 +227,44 @@ thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) 
   }
 })
 
-// Serve the custom thinking animation
+// Serve custom thinking animation file
 thinkingPublicRoutes.get('/api/hermes/thinking-animation/file', async (ctx: any) => {
   try {
-    await ensureDir()
+    await ensureDir(ANIMATION_DIR)
 
-    // Check for MP4, GIF, WebM in order
-    const mp4Path = safePath(ANIMATION_DIR, 'thinking-custom.mp4')
-    const gifPath = safePath(ANIMATION_DIR, 'thinking-custom.gif')
-    const webmPath = safePath(ANIMATION_DIR, 'thinking-custom.webm')
+    // Check in priority order: mp4, gif, webm
+    const checkOrder: Array<[string, string]> = [
+      ['thinking-custom.mp4', 'mp4'],
+      ['thinking-custom.gif', 'gif'],
+      ['thinking-custom.webm', 'webm']
+    ]
 
-    if (mp4Path && existsSync(mp4Path)) {
-      const data = await readFile(mp4Path)
-      ctx.set('Content-Type', 'video/mp4')
-      ctx.set('Cache-Control', 'no-cache')
-      ctx.body = data
-    } else if (gifPath && existsSync(gifPath)) {
-      const data = await readFile(gifPath)
-      ctx.set('Content-Type', 'image/gif')
-      ctx.set('Cache-Control', 'no-cache')
-      ctx.body = data
-    } else if (webmPath && existsSync(webmPath)) {
-      const data = await readFile(webmPath)
-      ctx.set('Content-Type', 'video/webm')
-      ctx.set('Cache-Control', 'no-cache')
-      ctx.body = data
-    } else {
-      ctx.status = 404
-      ctx.body = { error: 'No custom animation found' }
+    for (const [filename, type] of checkOrder) {
+      const fp = safePath(ANIMATION_DIR, filename)
+      if (fp && existsSync(fp)) {
+        const data = await readFile(fp)
+        ctx.set('Content-Type', MIME_MAP[type] || 'application/octet-stream')
+        ctx.set('Cache-Control', 'no-cache')
+        ctx.body = data
+        return
+      }
     }
+
+    ctx.status = 404
+    ctx.body = { error: 'No custom animation found' }
   } catch (error: any) {
     ctx.status = 500
     ctx.body = { error: error.message }
   }
 })
 
-// Delete custom thinking animation (reset to default)
+// Delete custom thinking animation (revert to default)
 thinkingProtectedRoutes.delete('/api/hermes/thinking-animation', async (ctx: any) => {
   try {
-    await ensureDir()
+    await ensureDir(ANIMATION_DIR)
 
-    for (const name of ALLOWED_OUTPUT_NAMES) {
-      const fp = safePath(ANIMATION_DIR, name)
+    for (const filename of ALLOWED_OUTPUT_NAMES) {
+      const fp = safePath(ANIMATION_DIR, filename)
       if (fp && existsSync(fp)) await unlink(fp)
     }
 
@@ -244,16 +275,27 @@ thinkingProtectedRoutes.delete('/api/hermes/thinking-animation', async (ctx: any
   }
 })
 
-// Check if custom animation exists
+// Check if custom thinking animation exists
 thinkingPublicRoutes.get('/api/hermes/thinking-animation/status', async (ctx: any) => {
   try {
-    await ensureDir()
+    await ensureDir(ANIMATION_DIR)
 
     let hasCustom = false
-    let type = null
-    for (const [name, t] of [['thinking-custom.mp4', 'mp4'], ['thinking-custom.gif', 'gif'], ['thinking-custom.webm', 'webm']] as const) {
-      const fp = safePath(ANIMATION_DIR, name)
-      if (fp && existsSync(fp)) { hasCustom = true; type = t; break }
+    let type: string | null = null
+
+    const checkOrder: Array<[string, string]> = [
+      ['thinking-custom.mp4', 'mp4'],
+      ['thinking-custom.gif', 'gif'],
+      ['thinking-custom.webm', 'webm']
+    ]
+
+    for (const [filename, ext] of checkOrder) {
+      const fp = safePath(ANIMATION_DIR, filename)
+      if (fp && existsSync(fp)) {
+        hasCustom = true
+        type = ext
+        break
+      }
     }
 
     ctx.body = { hasCustom, type }

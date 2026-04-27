@@ -18,6 +18,7 @@ import { configRoutes } from './hermes/config'
 import { logRoutes } from './hermes/logs'
 import { codexAuthRoutes } from './hermes/codex-auth'
 import { nousAuthRoutes } from './hermes/nous-auth'
+import { copilotAuthRoutes } from './hermes/copilot-auth'
 import { gatewayRoutes } from './hermes/gateways'
 import { weixinRoutes } from './hermes/weixin'
 import { fileRoutes } from './hermes/files'
@@ -25,6 +26,7 @@ import { downloadRoutes } from './hermes/download'
 import { jobRoutes } from './hermes/jobs'
 import { proxyRoutes, proxyMiddleware } from './hermes/proxy'
 import { groupChatRoutes, setGroupChatServer } from './hermes/group-chat'
+import { avatarPublicRoutes, avatarProtectedRoutes } from './hermes/avatar'
 import { thinkingPublicRoutes, thinkingProtectedRoutes } from './hermes/thinking-animation'
 
 /**
@@ -36,6 +38,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   // --- Public routes (no auth required) ---
   app.use(healthRoutes.routes())
   app.use(webhookRoutes.routes())
+  app.use(avatarPublicRoutes.routes())
   app.use(thinkingPublicRoutes.routes())
   app.use(authPublicRoutes.routes())
 
@@ -44,6 +47,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
 
   // --- Protected routes (auth required) ---
   app.use(authProtectedRoutes.routes())
+  app.use(avatarProtectedRoutes.routes())
   app.use(thinkingProtectedRoutes.routes())
   app.use(uploadRoutes.routes())
   app.use(updateRoutes.routes())           // Must be before proxy (proxy catch-all matches everything)
@@ -57,6 +61,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(logRoutes.routes())
   app.use(codexAuthRoutes.routes())
   app.use(nousAuthRoutes.routes())
+  app.use(copilotAuthRoutes.routes())
   app.use(gatewayRoutes.routes())
   app.use(weixinRoutes.routes())
   app.use(groupChatRoutes.routes())       // Must be before proxy
