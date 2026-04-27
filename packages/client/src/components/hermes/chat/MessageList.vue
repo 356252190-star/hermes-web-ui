@@ -12,6 +12,47 @@ const { t } = useI18n();
 const { isDark } = useTheme();
 const listRef = ref<HTMLElement>();
 
+// Custom thinking animation
+const customAnimSrc = ref<string | null>(null);
+const customAnimType = ref<string | null>(null);
+const userDismissed = ref(false);
+
+function getAuthHeader(): string {
+  const profilesKey = localStorage.getItem("hermes_profiles_key");
+  const api = localStorage.getItem("hermes_api_key");
+  return `Bearer ${(profilesKey || api || "").replace(/"/g, "")}`;
+}
+
+async function fetchCustomAnimation() {
+  try {
+    const res = await fetch("/api/hermes/thinking-animation/status", {
+      headers: { Authorization: getAuthHeader() },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.hasCustom) {
+      customAnimSrc.value = "/api/hermes/thinking-animation/file";
+      customAnimType.value = data.type === "gif" ? "gif" : "video";
+      userDismissed.value = false;
+    } else {
+      customAnimSrc.value = null;
+      customAnimType.value = null;
+    }
+  } catch {}
+}
+
+function onAnimError() {
+  userDismissed.value = true;
+}
+
+fetchCustomAnimation();
+watch(
+  () => chatStore.isStreaming,
+  (val) => {
+    if (val) fetchCustomAnimation();
+  },
+);
+
 const displayMessages = computed(() =>
   chatStore.messages.filter((m) => m.role !== "tool"),
 );
@@ -120,7 +161,24 @@ watch(currentToolCalls, () => {
     />
     <Transition name="fade">
       <div v-if="chatStore.isRunActive" class="streaming-indicator">
+        <img
+          v-if="customAnimSrc && customAnimType === 'gif' && !userDismissed"
+          :src="customAnimSrc"
+          class="thinking-video"
+          @error="onAnimError"
+        />
         <video
+          v-else-if="customAnimSrc && customAnimType === 'video' && !userDismissed"
+          :src="customAnimSrc"
+          autoplay
+          loop
+          muted
+          playsinline
+          class="thinking-video"
+          @error="onAnimError"
+        />
+        <video
+          v-else
           :src="isDark ? thinkingVideoDark : thinkingVideoLight"
           autoplay
           loop
