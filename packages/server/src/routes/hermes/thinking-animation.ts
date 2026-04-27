@@ -9,7 +9,8 @@ import { config } from '../../config'
 
 const execFileAsync = promisify(execFile)
 
-const thinkingRoutes = new Router()
+const thinkingPublicRoutes = new Router()
+const thinkingProtectedRoutes = new Router()
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100MB
 const ANIMATION_DIR = path.join(config.uploadDir, 'thinking-animations')
@@ -92,7 +93,7 @@ async function parseMultipartBody(
 }
 
 // Upload thinking animation
-thinkingRoutes.post('/api/hermes/thinking-animation', async (ctx: any) => {
+thinkingProtectedRoutes.post('/api/hermes/thinking-animation', async (ctx: any) => {
   try {
     await ensureDir()
 
@@ -192,7 +193,7 @@ thinkingRoutes.post('/api/hermes/thinking-animation', async (ctx: any) => {
 })
 
 // Serve the custom thinking animation
-thinkingRoutes.get('/api/hermes/thinking-animation/file', async (ctx: any) => {
+thinkingPublicRoutes.get('/api/hermes/thinking-animation/file', async (ctx: any) => {
   try {
     await ensureDir()
 
@@ -227,7 +228,7 @@ thinkingRoutes.get('/api/hermes/thinking-animation/file', async (ctx: any) => {
 })
 
 // Delete custom thinking animation (reset to default)
-thinkingRoutes.delete('/api/hermes/thinking-animation', async (ctx: any) => {
+thinkingProtectedRoutes.delete('/api/hermes/thinking-animation', async (ctx: any) => {
   try {
     await ensureDir()
 
@@ -244,7 +245,7 @@ thinkingRoutes.delete('/api/hermes/thinking-animation', async (ctx: any) => {
 })
 
 // Check if custom animation exists
-thinkingRoutes.get('/api/hermes/thinking-animation/status', async (ctx: any) => {
+thinkingPublicRoutes.get('/api/hermes/thinking-animation/status', async (ctx: any) => {
   try {
     await ensureDir()
 
@@ -262,4 +263,4 @@ thinkingRoutes.get('/api/hermes/thinking-animation/status', async (ctx: any) => 
   }
 })
 
-export { thinkingRoutes }
+export { thinkingPublicRoutes, thinkingProtectedRoutes }

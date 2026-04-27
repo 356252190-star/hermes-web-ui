@@ -1,11 +1,12 @@
 import Router from '@koa/router'
 import { randomBytes } from 'crypto'
-import { writeFile, readFile, unlink, mkdir, stat } from 'fs/promises'
+import { writeFile, readFile, unlink, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
 import { config } from '../../config'
 
-const avatarRoutes = new Router()
+const avatarPublicRoutes = new Router()
+const avatarProtectedRoutes = new Router()
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024 // 5MB
 const AVATAR_DIR = path.join(config.uploadDir, 'avatars')
@@ -82,7 +83,7 @@ function sanitizeProfile(profile: string): string {
 }
 
 // Upload avatar (AI or user)
-avatarRoutes.post('/api/hermes/avatar/:type', async (ctx: any) => {
+avatarProtectedRoutes.post('/api/hermes/avatar/:type', async (ctx: any) => {
   try {
     const { type } = ctx.params
     if (type !== 'ai' && type !== 'user') {
@@ -149,7 +150,7 @@ avatarRoutes.post('/api/hermes/avatar/:type', async (ctx: any) => {
 })
 
 // Serve avatar
-avatarRoutes.get('/api/hermes/avatar/:type', async (ctx: any) => {
+avatarPublicRoutes.get('/api/hermes/avatar/:type', async (ctx: any) => {
   try {
     const { type } = ctx.params
     if (type !== 'ai' && type !== 'user') {
@@ -190,7 +191,7 @@ avatarRoutes.get('/api/hermes/avatar/:type', async (ctx: any) => {
 })
 
 // Delete avatar
-avatarRoutes.delete('/api/hermes/avatar/:type', async (ctx: any) => {
+avatarProtectedRoutes.delete('/api/hermes/avatar/:type', async (ctx: any) => {
   try {
     const { type } = ctx.params
     if (type !== 'ai' && type !== 'user') {
@@ -216,7 +217,7 @@ avatarRoutes.delete('/api/hermes/avatar/:type', async (ctx: any) => {
 })
 
 // Check avatar status
-avatarRoutes.get('/api/hermes/avatar/status/:type', async (ctx: any) => {
+avatarPublicRoutes.get('/api/hermes/avatar/status/:type', async (ctx: any) => {
   try {
     const { type } = ctx.params
     if (type !== 'ai' && type !== 'user') {
@@ -247,4 +248,4 @@ avatarRoutes.get('/api/hermes/avatar/status/:type', async (ctx: any) => {
   }
 })
 
-export { avatarRoutes }
+export { avatarPublicRoutes, avatarProtectedRoutes }
