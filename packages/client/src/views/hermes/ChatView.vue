@@ -14,6 +14,8 @@ onMounted(async () => {
   // 先加载 profile，确保缓存 key 使用正确的 profile name
   await profilesStore.fetchProfiles()
   chatStore.loadSessions()
+  chatStore.loadUserAvatar()
+  chatStore.updateAiAvatar()
 })
 </script>
 
