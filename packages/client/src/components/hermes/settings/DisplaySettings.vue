@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/hermes/settings'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import SettingRow from './SettingRow.vue'
+import ThinkingAnimationPicker from './ThinkingAnimationPicker.vue'
 
 const settingsStore = useSettingsStore()
 const message = useMessage()
@@ -58,13 +59,17 @@ function handleThemeChange(val: string) {
     <SettingRow :label="t('settings.display.busyInputMode')" :hint="t('settings.display.busyInputModeHint')">
       <NSwitch :value="settingsStore.display.busy_input_mode === 'interrupt'" @update:value="v => save({ busy_input_mode: v ? 'interrupt' : 'off' })" />
     </SettingRow>
+    <ThinkingAnimationPicker />
   </section>
 </template>
 
 <style scoped lang="scss">
-@use '@/styles/variables' as *;
-
 .settings-section {
-  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.input-sm {
+  min-width: 120px;
 }
 </style>
