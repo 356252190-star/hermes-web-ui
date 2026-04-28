@@ -5,6 +5,7 @@ import { useSettingsStore } from '@/stores/hermes/settings'
 import ThinkingAnimationPicker from './ThinkingAnimationPicker.vue'
 import { useTheme, type ThemeMode } from '@/composables/useTheme'
 import SettingRow from './SettingRow.vue'
+import ThinkingAnimationPicker from './ThinkingAnimationPicker.vue'
 
 const settingsStore = useSettingsStore()
 const message = useMessage()
@@ -60,6 +61,10 @@ function handleThemeChange(val: string) {
       <NSwitch :value="settingsStore.display.busy_input_mode === 'interrupt'" @update:value="v => save({ busy_input_mode: v ? 'interrupt' : 'off' })" />
     </SettingRow>
     <ThinkingAnimationPicker />
+
+    <SettingRow :label="t('settings.display.taTitle')" :hint="t('settings.display.taHint')">
+      <ThinkingAnimationPicker />
+    </SettingRow>
   </section>
 </template>
 
