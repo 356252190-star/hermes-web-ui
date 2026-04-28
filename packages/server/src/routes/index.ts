@@ -26,6 +26,7 @@ import { downloadRoutes } from './hermes/download'
 import { jobRoutes } from './hermes/jobs'
 import { proxyRoutes, proxyMiddleware } from './hermes/proxy'
 import { groupChatRoutes, setGroupChatServer } from './hermes/group-chat'
+import { thinkingAnimationPublicRoutes, thinkingAnimationProtectedRoutes } from './thinking-animation'
 import { thinkingPublicRoutes, thinkingProtectedRoutes } from './hermes/thinking-animation'
 
 /**
@@ -39,6 +40,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(webhookRoutes.routes())
   app.use(thinkingPublicRoutes.routes())
   app.use(authPublicRoutes.routes())
+  app.use(thinkingAnimationPublicRoutes.routes())
 
   // --- Auth middleware: all routes below require authentication ---
   app.use(requireAuth)
@@ -65,6 +67,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(fileRoutes.routes())              // Must be before proxy (proxy catch-all matches everything)
   app.use(downloadRoutes.routes())          // Must be before proxy
   app.use(jobRoutes.routes())               // Must be before proxy
+  app.use(thinkingAnimationProtectedRoutes.routes())
   app.use(proxyRoutes.routes())
 
   // Proxy catch-all middleware (must be last)
