@@ -113,7 +113,7 @@ onMounted(checkStatus)
         accept=".gif,.mp4,.webm,.mov,.avi,.mkv"
         :max="1"
         :disabled="uploading"
-        show-file-list="false"
+        :show-file-list="false"
       >
         <NButton size="small" :loading="uploading" secondary>
           {{ uploading ? t('settings.display.thinkingAnimationUploading') : t('settings.display.thinkingAnimationUpload') }}
