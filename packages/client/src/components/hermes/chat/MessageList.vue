@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 import MessageItem from "./MessageItem.vue";
 import { useChatStore } from "@/stores/hermes/chat";
@@ -11,6 +11,41 @@ const chatStore = useChatStore();
 const { t } = useI18n();
 const { isDark } = useTheme();
 const listRef = ref<HTMLElement>();
+
+// Custom thinking animation state
+const customAnimUrl = ref<string>('')
+const customAnimType = ref<'gif' | 'video'>('gif')
+const hasCustomAnim = computed(() => !!customAnimUrl.value)
+
+const thinkingSrc = computed(() => {
+  if (hasCustomAnim.value) return customAnimUrl.value
+  return isDark.value ? thinkingVideoDark : thinkingVideoLight
+})
+
+async function checkCustomAnimation() {
+  try {
+    const res = await fetch('/api/thinking-animation/status')
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.hasCustom && data.url) {
+      // Add cache-buster to ensure fresh load after upload
+      customAnimUrl.value = data.url + '?t=' + Date.now()
+      customAnimType.value = data.type || 'gif'
+    }
+  } catch {
+    // Silently ignore — custom animation is optional
+  }
+}
+
+// Listen for animation upload events from picker
+function onTaUploaded() {
+  void checkCustomAnimation()
+}
+
+onMounted(() => {
+  void checkCustomAnimation()
+  window.addEventListener('ta-uploaded', onTaUploaded)
+})
 
 const displayMessages = computed(() =>
   chatStore.messages.filter((m) => m.role !== "tool"),
@@ -120,8 +155,15 @@ watch(currentToolCalls, () => {
     />
     <Transition name="fade">
       <div v-if="chatStore.isRunActive" class="streaming-indicator">
+        <img
+          v-if="hasCustomAnim && customAnimType === 'gif'"
+          :src="thinkingSrc"
+          class="thinking-video"
+          alt="thinking"
+        />
         <video
-          :src="isDark ? thinkingVideoDark : thinkingVideoLight"
+          v-else
+          :src="thinkingSrc"
           autoplay
           loop
           muted

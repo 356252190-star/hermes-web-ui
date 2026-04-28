@@ -30,6 +30,9 @@ import { groupChatRoutes, setGroupChatServer } from './hermes/group-chat'
 // Thinking animation routes
 import { thinkingAnimationPublicRoutes, thinkingAnimationProtectedRoutes } from './thinking-animation'
 
+// Avatar routes
+import { avatarPublicRoutes, avatarProtectedRoutes } from './avatar'
+
 /**
  * Register all routes on the Koa app.
  * Public routes are registered first, then auth middleware,
@@ -41,6 +44,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(webhookRoutes.routes())
   app.use(authPublicRoutes.routes())
   app.use(thinkingAnimationPublicRoutes.routes())
+  app.use(avatarPublicRoutes.routes())
 
   // --- Auth middleware: all routes below require authentication ---
   app.use(requireAuth)
@@ -67,6 +71,7 @@ export function registerRoutes(app: any, requireAuth: (ctx: Context, next: Next)
   app.use(downloadRoutes.routes())          // Must be before proxy
   app.use(jobRoutes.routes())               // Must be before proxy
   app.use(thinkingAnimationProtectedRoutes.routes())
+  app.use(avatarProtectedRoutes.routes())
   app.use(proxyRoutes.routes())
 
   // Proxy catch-all middleware (must be last)

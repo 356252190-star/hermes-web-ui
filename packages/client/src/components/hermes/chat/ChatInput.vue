@@ -4,12 +4,14 @@ import { useChatStore } from '@/stores/hermes/chat'
 import { useAppStore } from '@/stores/hermes/app'
 import { useProfilesStore } from '@/stores/hermes/profiles'
 import { fetchContextLength } from '@/api/hermes/sessions'
-import { NButton, NTooltip } from 'naive-ui'
+import { NButton, NTooltip, useMessage } from 'naive-ui'
 import { computed, ref, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ImageCropDialog from './ImageCropDialog.vue'
 
 const chatStore = useChatStore()
 const { t } = useI18n()
+const toast = useMessage()
 const inputText = ref('')
 const textareaRef = ref<HTMLTextAreaElement>()
 const fileInputRef = ref<HTMLInputElement>()
@@ -17,6 +19,78 @@ const attachments = ref<Attachment[]>([])
 const isDragging = ref(false)
 const dragCounter = ref(0)
 const isComposing = ref(false)
+
+// --- Avatar upload ---
+const avatarFileInputRef = ref<HTMLInputElement>()
+const showCropDialog = ref(false)
+const cropImageSrc = ref('')
+const cropFileName = ref('')
+const pendingAvatarFile = ref<File | null>(null)
+
+const ANIMATED_TYPES = ['image/gif', 'image/apng']
+function isAnimated(type: string): boolean {
+  return ANIMATED_TYPES.includes(type)
+}
+
+function handleUserAvatarClick() {
+  avatarFileInputRef.value?.click()
+}
+
+function handleAvatarFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (!input.files?.[0]) return
+  const file = input.files[0]
+  input.value = ''
+
+  // Validate file size (5MB)
+  if (file.size > 5 * 1024 * 1024) {
+    toast.error(t('avatar.fileTooLarge'))
+    return
+  }
+  // Validate file type
+  const validTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+  if (!validTypes.includes(file.type)) {
+    toast.error(t('avatar.invalidType'))
+    return
+  }
+
+  // Animated images skip crop dialog
+  if (isAnimated(file.type)) {
+    void doUploadAvatar(file)
+    return
+  }
+
+  // Show crop dialog for static images
+  pendingAvatarFile.value = file
+  cropImageSrc.value = URL.createObjectURL(file)
+  cropFileName.value = file.name
+  showCropDialog.value = true
+}
+
+async function doUploadAvatar(file: File | Blob, fileName?: string) {
+  try {
+    await chatStore.uploadAvatar('user', file, fileName)
+    toast.success(t('avatar.uploadSuccess'))
+  } catch (err: any) {
+    toast.error(err.message || t('avatar.uploadFailed'))
+  }
+}
+
+function handleCropDone(blob: Blob) {
+  showCropDialog.value = false
+  const name = pendingAvatarFile.value?.name || 'avatar.png'
+  URL.revokeObjectURL(cropImageSrc.value)
+  cropImageSrc.value = ''
+  pendingAvatarFile.value = null
+  void doUploadAvatar(blob, name)
+}
+
+function handleCropCancel() {
+  showCropDialog.value = false
+  URL.revokeObjectURL(cropImageSrc.value)
+  cropImageSrc.value = ''
+  pendingAvatarFile.value = null
+}
 
 const canSend = computed(() => inputText.value.trim() || attachments.value.length > 0)
 
@@ -261,6 +335,30 @@ function isImage(type: string): boolean {
         class="file-input-hidden"
         @change="handleFileChange"
       />
+      <input
+        ref="avatarFileInputRef"
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        class="file-input-hidden"
+        @change="handleAvatarFileChange"
+      />
+      <NTooltip trigger="hover">
+        <template #trigger>
+          <div class="user-avatar-btn" @click="handleUserAvatarClick">
+            <img
+              v-if="chatStore.userAvatarUrl"
+              :src="chatStore.userAvatarUrl"
+              :alt="t('avatar.user')"
+              class="user-avatar-img"
+            />
+            <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+        </template>
+        {{ t('avatar.changeUserAvatar') }}
+      </NTooltip>
       <textarea
         ref="textareaRef"
         v-model="inputText"
@@ -296,6 +394,13 @@ function isImage(type: string): boolean {
       </div>
     </div>
   </div>
+  <ImageCropDialog
+    :visible="showCropDialog"
+    :image-src="cropImageSrc"
+    :file-name="cropFileName"
+    @crop="handleCropDone"
+    @cancel="handleCropCancel"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -421,6 +526,33 @@ function isImage(type: string): boolean {
 
 .file-input-hidden {
   display: none;
+}
+
+.user-avatar-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  background: rgba(128, 128, 128, 0.15);
+  color: $text-muted;
+  overflow: hidden;
+  transition: background $transition-fast, transform $transition-fast;
+
+  &:hover {
+    background: rgba(128, 128, 128, 0.25);
+    transform: scale(1.05);
+  }
+}
+
+.user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 .input-wrapper {

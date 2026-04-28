@@ -1225,6 +1225,76 @@ export const useChatStore = defineStore('chat', () => {
     thinkingObservation.clear()
   }
 
+  // --- Avatar state ---
+  const userAvatarUrl = ref<string | null>(null)
+  const assistantAvatarUrl = ref<string | null>(null)
+
+  function getProfileName(): string {
+    return useProfilesStore().activeProfileName || 'default'
+  }
+
+  async function loadAvatars() {
+    const profile = getProfileName()
+    try {
+      const res = await fetch(`/api/avatar/${encodeURIComponent(profile)}/status`)
+      if (!res.ok) return
+      const data = await res.json()
+      // Add cache-buster to force reload
+      const ts = Date.now()
+      userAvatarUrl.value = data.user?.exists
+        ? `${data.user.url}?t=${ts}`
+        : null
+      assistantAvatarUrl.value = data.assistant?.exists
+        ? `${data.assistant.url}?t=${ts}`
+        : null
+    } catch {
+      // Silently ignore — avatars are optional
+    }
+  }
+
+  async function uploadAvatar(type: 'user' | 'assistant', file: File | Blob, fileName?: string) {
+    const profile = getProfileName()
+    const formData = new FormData()
+    formData.append('file', file, fileName || `${type}.png`)
+    const token = localStorage.getItem('hermes_api_key') || ''
+    const res = await fetch(`/api/avatar/${encodeURIComponent(profile)}/${type}`, {
+      method: 'POST',
+      body: formData,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `Upload failed: ${res.status}`)
+    }
+    const data = await res.json()
+    // Update local state
+    const ts = Date.now()
+    if (type === 'user') {
+      userAvatarUrl.value = `${data.url}?t=${ts}`
+    } else {
+      assistantAvatarUrl.value = `${data.url}?t=${ts}`
+    }
+    return data
+  }
+
+  async function deleteAvatar(type: 'user' | 'assistant') {
+    const profile = getProfileName()
+    const token = localStorage.getItem('hermes_api_key') || ''
+    const res = await fetch(`/api/avatar/${encodeURIComponent(profile)}/${type}`, {
+      method: 'DELETE',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.error || `Delete failed: ${res.status}`)
+    }
+    if (type === 'user') {
+      userAvatarUrl.value = null
+    } else {
+      assistantAvatarUrl.value = null
+    }
+  }
+
   return {
     sessions,
     activeSessionId,
@@ -1252,5 +1322,12 @@ export const useChatStore = defineStore('chat', () => {
     noteReasoningStart,
     noteReasoningEnd,
     clearThinkingObservationFor,
+
+    // Avatar
+    userAvatarUrl,
+    assistantAvatarUrl,
+    loadAvatars,
+    uploadAvatar,
+    deleteAvatar,
   }
 })

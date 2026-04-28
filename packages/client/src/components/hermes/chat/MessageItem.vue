@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import { useMessage } from "naive-ui";
 import { downloadFile } from "@/api/hermes/download";
 import MarkdownRenderer from "./MarkdownRenderer.vue";
+import ImageCropDialog from "./ImageCropDialog.vue";
 import { parseThinking, countThinkingChars } from "@/utils/thinking-parser";
 import { useChatStore } from "@/stores/hermes/chat";
 import { useSettingsStore } from "@/stores/hermes/settings";
@@ -19,6 +20,75 @@ const TOOL_PAYLOAD_DISPLAY_LIMIT = 2000;
 const props = defineProps<{ message: Message; highlight?: boolean }>();
 const { t } = useI18n();
 const toast = useMessage();
+
+// --- Assistant avatar upload ---
+const avatarFileInputRef = ref<HTMLInputElement>()
+const showCropDialog = ref(false)
+const cropImageSrc = ref('')
+const cropFileName = ref('')
+const pendingAvatarFile = ref<File | null>(null)
+
+const ANIMATED_TYPES = ['image/gif', 'image/apng']
+function isAnimated(type: string): boolean {
+  return ANIMATED_TYPES.includes(type)
+}
+
+function handleAssistantAvatarClick() {
+  avatarFileInputRef.value?.click()
+}
+
+function handleAvatarFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (!input.files?.[0]) return
+  const file = input.files[0]
+  input.value = ''
+
+  if (file.size > 5 * 1024 * 1024) {
+    toast.error(t('avatar.fileTooLarge'))
+    return
+  }
+  const validTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+  if (!validTypes.includes(file.type)) {
+    toast.error(t('avatar.invalidType'))
+    return
+  }
+
+  if (isAnimated(file.type)) {
+    void doUploadAvatar(file)
+    return
+  }
+
+  pendingAvatarFile.value = file
+  cropImageSrc.value = URL.createObjectURL(file)
+  cropFileName.value = file.name
+  showCropDialog.value = true
+}
+
+async function doUploadAvatar(file: File | Blob, fileName?: string) {
+  try {
+    await chatStore.uploadAvatar('assistant', file, fileName)
+    toast.success(t('avatar.uploadSuccess'))
+  } catch (err: any) {
+    toast.error(err.message || t('avatar.uploadFailed'))
+  }
+}
+
+function handleCropDone(blob: Blob) {
+  showCropDialog.value = false
+  const name = pendingAvatarFile.value?.name || 'avatar.png'
+  URL.revokeObjectURL(cropImageSrc.value)
+  cropImageSrc.value = ''
+  pendingAvatarFile.value = null
+  void doUploadAvatar(blob, name)
+}
+
+function handleCropCancel() {
+  showCropDialog.value = false
+  URL.revokeObjectURL(cropImageSrc.value)
+  cropImageSrc.value = ''
+  pendingAvatarFile.value = null
+}
+
 
 const isSystem = computed(() => props.message.role === "system");
 const toolExpanded = ref(false);
@@ -338,11 +408,21 @@ const renderedToolResult = computed(() => {
     </template>
     <template v-else>
       <div class="msg-body">
-        <img
+        <div class="assistant-avatar-wrap" @click="handleAssistantAvatarClick" :title="t('avatar.changeAiAvatar')">
+          <img
+            v-if="message.role === 'assistant'"
+            :src="chatStore.assistantAvatarUrl || '/logo.png'"
+            alt="Hermes"
+            class="msg-avatar"
+          />
+        </div>
+        <input
           v-if="message.role === 'assistant'"
-          src="/logo.png"
-          alt="Hermes"
-          class="msg-avatar"
+          ref="avatarFileInputRef"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          class="avatar-file-hidden"
+          @change="handleAvatarFileChange"
         />
         <div class="msg-content" :class="message.role">
           <div class="message-bubble" :class="{ system: isSystem }">
@@ -456,6 +536,13 @@ const renderedToolResult = computed(() => {
       <img :src="previewUrl" class="image-preview-img" @click="previewUrl = null" />
     </div>
   </Teleport>
+  <ImageCropDialog
+    :visible="showCropDialog"
+    :image-src="cropImageSrc"
+    :file-name="cropFileName"
+    @crop="handleCropDone"
+    @cancel="handleCropCancel"
+  />
 </template>
 
 <style scoped lang="scss">
@@ -496,6 +583,24 @@ const renderedToolResult = computed(() => {
       height: 40px;
       flex-shrink: 0;
       margin-top: 2px;
+      border-radius: 50%;
+    }
+
+    .assistant-avatar-wrap {
+      cursor: pointer;
+      border-radius: 50%;
+      overflow: hidden;
+      transition: opacity $transition-fast, transform $transition-fast;
+      flex-shrink: 0;
+
+      &:hover {
+        opacity: 0.8;
+        transform: scale(1.05);
+      }
+
+      .msg-avatar {
+        margin-top: 0;
+      }
     }
 
     .message-bubble {
@@ -874,6 +979,10 @@ const renderedToolResult = computed(() => {
   max-height: 90vh;
   object-fit: contain;
   border-radius: 4px;
+}
+
+.avatar-file-hidden {
+  display: none;
 }
 
 @media (max-width: $breakpoint-mobile) {

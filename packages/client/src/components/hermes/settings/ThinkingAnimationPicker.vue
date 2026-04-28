@@ -45,9 +45,11 @@ async function handleUpload({ file }: UploadCustomRequestOptions) {
   try {
     const formData = new FormData()
     formData.append('file', file.file, file.name)
+    const token = localStorage.getItem('hermes_api_key') || ''
     const res = await fetch('/api/thinking-animation/upload', {
       method: 'POST',
       body: formData,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
     const data = await res.json()
     if (data.success) {
@@ -67,7 +69,11 @@ async function handleUpload({ file }: UploadCustomRequestOptions) {
 
 async function handleReset() {
   try {
-    const res = await fetch('/api/thinking-animation', { method: 'DELETE' })
+    const token = localStorage.getItem('hermes_api_key') || ''
+    const res = await fetch('/api/thinking-animation', {
+      method: 'DELETE',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
     const data = await res.json()
     if (data.success) {
       hasCustom.value = false
@@ -113,7 +119,7 @@ onMounted(checkStatus)
         accept=".gif,.mp4,.webm,.mov,.avi,.mkv"
         :max="1"
         :disabled="uploading"
-        show-file-list="false"
+        :show-file-list="false"
       >
         <NButton size="small" :loading="uploading" secondary>
           {{ uploading ? t('settings.display.thinkingAnimationUploading') : t('settings.display.thinkingAnimationUpload') }}
