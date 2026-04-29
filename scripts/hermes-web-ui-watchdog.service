@@ -1,0 +1,27 @@
+[Unit]
+Description=hermes-web-ui watchdog
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+# User/Group set by install-watchdog.sh
+ExecStart=/bin/bash /path/to/watchdog.sh
+Restart=always
+RestartSec=10
+
+Environment=HEALTH_URL=http://127.0.0.1:8648/health
+Environment=CHECK_INTERVAL=30
+Environment=MAX_RETRIES=3
+Environment=HERMES_WEB_UI_DATA=/home/user/.hermes-web-ui
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-web-ui-watchdog
+
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/home/user/.hermes-web-ui
+
+[Install]
+WantedBy=multi-user.target
